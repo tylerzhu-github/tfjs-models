@@ -1,7 +1,7 @@
 import * as tf from '@tensorflow/tfjs-core';
 
 import {BodyPixInput, Padding} from './types';
-import {Pose, TensorBuffer3D} from './types';
+import {TensorBuffer3D} from './types';
 
 export function getInputTensorDimensions(input: BodyPixInput):
     [number, number] {
@@ -152,7 +152,6 @@ export function padAndResizeTo(
   }
 }
 
-
 export async function toTensorBuffer<rank extends tf.Rank>(
     tensor: tf.Tensor<rank>,
     type: 'float32'|'int32' = 'float32'): Promise<tf.TensorBuffer<rank>> {
@@ -165,67 +164,4 @@ export async function toTensorBuffer<rank extends tf.Rank>(
 export async function toTensorBuffers3D(tensors: tf.Tensor3D[]):
     Promise<TensorBuffer3D[]> {
   return Promise.all(tensors.map(tensor => toTensorBuffer(tensor, 'float32')));
-}
-
-export function scalePose(
-    pose: Pose, scaleY: number, scaleX: number, offsetY = 0,
-    offsetX = 0): Pose {
-  return {
-    score: pose.score,
-    keypoints: pose.keypoints.map(({score, part, position}) => ({
-                                    score,
-                                    part,
-                                    position: {
-                                      x: position.x * scaleX + offsetX,
-                                      y: position.y * scaleY + offsetY
-                                    }
-                                  }))
-  };
-}
-
-export function scalePoses(
-    poses: Pose[], scaleY: number, scaleX: number, offsetY = 0, offsetX = 0) {
-  if (scaleX === 1 && scaleY === 1 && offsetY === 0 && offsetX === 0) {
-    return poses;
-  }
-  return poses.map(pose => scalePose(pose, scaleY, scaleX, offsetY, offsetX));
-}
-
-export function flipPoseHorizontal(pose: Pose, imageWidth: number): Pose {
-  return {
-    score: pose.score,
-    keypoints: pose.keypoints.map(
-        ({score, part, position}) => ({
-          score,
-          part,
-          position: {x: imageWidth - 1 - position.x, y: position.y}
-        }))
-  };
-}
-
-export function flipPosesHorizontal(poses: Pose[], imageWidth: number) {
-  if (imageWidth <= 0) {
-    return poses;
-  }
-  return poses.map(pose => flipPoseHorizontal(pose, imageWidth));
-}
-
-
-export function scaleAndFlipPoses(
-    poses: Pose[], [height, width]: [number, number],
-    [inputResolutionHeight, inputResolutionWidth]: [number, number],
-    padding: Padding, flipHorizontal: boolean): Pose[] {
-  const scaleY =
-      (height + padding.top + padding.bottom) / (inputResolutionHeight);
-  const scaleX =
-      (width + padding.left + padding.right) / (inputResolutionWidth);
-
-  const scaledPoses =
-      scalePoses(poses, scaleY, scaleX, -padding.top, -padding.left);
-
-  if (flipHorizontal) {
-    return flipPosesHorizontal(scaledPoses, width);
-  } else {
-    return scaledPoses;
-  }
 }

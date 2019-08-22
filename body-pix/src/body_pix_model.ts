@@ -16,6 +16,8 @@
  * =============================================================================
  */
 
+import {decodeMultiplePoses, decodeSinglePose} from '@tensorflow-models/posenet';
+import {scaleAndFlipPoses} from '@tensorflow-models/posenet/dist/util';
 import * as tfconv from '@tensorflow/tfjs-converter';
 import * as tf from '@tensorflow/tfjs-core';
 
@@ -24,11 +26,9 @@ import {decodeOnlyPartSegmentation, decodePartSegmentation, toMask} from './deco
 import {MobileNetMultiplier} from './mobilenet';
 import {MobileNet} from './mobilenet';
 import {decodeMultipleMasksGPU, decodeMultiplePartMasksGPU} from './multi_person/decode_multiple_masks';
-import {decodeMultiplePoses} from './multi_person/decode_multiple_poses';
 import {ResNet} from './resnet';
-import {decodeSinglePose} from './sinlge_person/decode_single_pose';
 import {BodyPixInput, Padding, PartSegmentation, PersonSegmentation} from './types';
-import {getInputTensorDimensions, padAndResizeTo, scaleAndCropToInputTensorShape, scaleAndFlipPoses, toInputTensor, toTensorBuffers3D} from './util';
+import {getInputTensorDimensions, padAndResizeTo, scaleAndCropToInputTensorShape, toInputTensor, toTensorBuffers3D} from './util';
 
 export type BodyPixInputResolution =
     161|193|257|289|321|353|385|417|449|481|513|801|1217;
