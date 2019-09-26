@@ -1,7 +1,8 @@
 import * as tf from '@tensorflow/tfjs-core';
 
-import {BodyPixInput, Padding} from './types';
+import {BodyPixOutputStride} from './body_pix_model';
 import {Pose, TensorBuffer3D} from './types';
+import {BodyPixInput, InputResolution, Padding} from './types';
 
 export function getInputTensorDimensions(input: BodyPixInput):
     [number, number] {
@@ -228,4 +229,80 @@ export function scaleAndFlipPoses(
   } else {
     return scaledPoses;
   }
+}
+function toEvenNumber(value: number): number {
+  if (value % 2 === 0) {
+    return value;
+  } else {
+    return value - 1;
+  }
+}
+
+export function toValidInputResolution(
+    inputResolution: number, outputStride: BodyPixOutputStride): number {
+  if (isValidInputResolution(inputResolution, outputStride)) {
+    return inputResolution;
+  }
+
+  const evenResolution = toEvenNumber(inputResolution);
+
+  return evenResolution - (evenResolution % outputStride) + 1;
+}
+
+export function validateInputResolution(inputResolution: InputResolution) {
+  tf.util.assert(
+      typeof inputResolution === 'number' ||
+          typeof inputResolution === 'object',
+      () => `Invalid inputResolution ${inputResolution}. ` +
+          `Should be a number or an object with width and height`);
+
+  if (typeof inputResolution === 'object') {
+    tf.util.assert(
+        typeof inputResolution.width === 'number',
+        () => `inputResolution.width has a value of ${
+            inputResolution.width} which is invalid; it must be a number`);
+    tf.util.assert(
+        typeof inputResolution.height === 'number',
+        () => `inputResolution.height has a value of ${
+            inputResolution.height} which is invalid; it must be a number`);
+  }
+}
+
+export function getValidInputResolutionDimensions(
+    inputResolution: InputResolution,
+    outputStride: BodyPixOutputStride): [number, number] {
+  validateInputResolution(inputResolution);
+  if (typeof inputResolution === 'object') {
+    return [
+      toValidInputResolution(inputResolution.height, outputStride),
+      toValidInputResolution(inputResolution.width, outputStride),
+    ];
+  } else {
+    return [
+      toValidInputResolution(inputResolution, outputStride),
+      toValidInputResolution(inputResolution, outputStride),
+    ];
+  }
+}
+function isValidInputResolution(
+    resolution: number, outputStride: number): boolean {
+  return (resolution - 1) % outputStride === 0;
+}
+
+export function assertValidResolution(
+    resolution: [number, number], outputStride: number) {
+  tf.util.assert(
+      typeof resolution[0] === 'number' && typeof resolution[1] === 'number',
+      () => `both resolution values must be a number but had values ${
+          resolution}`);
+
+  tf.util.assert(
+      isValidInputResolution(resolution[0], outputStride),
+      () => `height of ${resolution[0]} is invalid for output stride ` +
+          `${outputStride}.`);
+
+  tf.util.assert(
+      isValidInputResolution(resolution[1], outputStride),
+      () => `width of ${resolution[1]} is invalid for output stride ` +
+          `${outputStride}.`);
 }

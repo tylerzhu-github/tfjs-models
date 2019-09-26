@@ -23,15 +23,13 @@ import {mobileNetCheckpoint, resNet50Checkpoint} from './checkpoints';
 import {decodeOnlyPartSegmentation, decodePartSegmentation, toMask} from './decode_part_map';
 import {MobileNetMultiplier} from './mobilenet';
 import {MobileNet} from './mobilenet';
-import {decodeMultipleMasksGPU, decodeMultiplePartMasksGPU} from './multi_person/decode_multiple_masks';
+import {decodeMultipleMasks, decodeMultiplePartMasks} from './multi_person/decode_multiple_masks';
 import {decodeMultiplePoses} from './multi_person/decode_multiple_poses';
 import {ResNet} from './resnet';
 import {decodeSinglePose} from './sinlge_person/decode_single_pose';
-import {BodyPixInput, Padding, PartSegmentation, PersonSegmentation} from './types';
-import {getInputTensorDimensions, padAndResizeTo, scaleAndCropToInputTensorShape, scaleAndFlipPoses, toInputTensor, toTensorBuffers3D} from './util';
+import {BodyPixInput, InputResolution, Padding, PartSegmentation, PersonSegmentation} from './types';
+import {getInputTensorDimensions, getValidInputResolutionDimensions, padAndResizeTo, scaleAndCropToInputTensorShape, scaleAndFlipPoses, toInputTensor, toTensorBuffers3D} from './util';
 
-export type BodyPixInputResolution =
-    161|193|257|289|321|353|385|417|449|481|513|801|1217;
 export type BodyPixOutputStride = 32|16|8;
 export type BodyPixArchitecture = 'ResNet50'|'MobileNetV1';
 export type BodyPixDecodingMethod = 'single-person'|'multi-person';
@@ -111,7 +109,7 @@ export interface BaseModel {
 export interface ModelConfig {
   architecture: BodyPixArchitecture;
   outputStride: BodyPixOutputStride;
-  inputResolution: BodyPixInputResolution;
+  inputResolution: InputResolution;
   multiplier?: MobileNetMultiplier;
   modelUrl?: string;
   quantBytes?: BodyPixQuantBytes;
@@ -252,10 +250,10 @@ function validateMultiPersonInferenceConfig(
 }
 
 export class BodyPix {
-  baseModel: BaseModel;
-  inputResolution: BodyPixInputResolution;
+  readonly baseModel: BaseModel;
+  readonly inputResolution: [number, number];
 
-  constructor(net: BaseModel, inputResolution: BodyPixInputResolution) {
+  constructor(net: BaseModel, inputResolution: [number, number]) {
     this.baseModel = net;
     this.inputResolution = inputResolution;
   }
@@ -363,8 +361,7 @@ export class BodyPix {
   } {
     const inputResolution = this.inputResolution;
     const imageTensor = toInputTensor(input);
-    const {resized, padding} =
-        padAndResizeTo(imageTensor, [inputResolution, inputResolution]);
+    const {resized, padding} = padAndResizeTo(imageTensor, inputResolution);
 
     const {segmentation, heatmapScores, offsets} = tf.tidy(() => {
       const {
@@ -435,13 +432,79 @@ export class BodyPix {
         heatmapScores, offsets, this.baseModel.outputStride);
 
     const resultPose = scaleAndFlipPoses(
-        [pose], [height, width], [this.inputResolution, this.inputResolution],
-        padding, configWithDefault.flipHorizontal)[0];
+        [pose], [height, width], this.inputResolution, padding,
+        configWithDefault.flipHorizontal)[0];
 
     heatmapScores.dispose();
     offsets.dispose();
 
     return {height, width, data: result, pose: resultPose};
+  }
+
+  estimateMultiplePersonSegmentationActivation(
+      input: BodyPixInput,
+      config: MultiPersonInferenceConfig = MULTI_PERSON_INFERENCE_CONFIG) {
+    const [height, width] = getInputTensorDimensions(input);
+    const inputResolution = this.inputResolution;
+
+    const {resized, padding} = padAndResizeTo(input, inputResolution);
+    const {
+      segmentation,
+      longOffsets,
+      heatmapScores,
+      offsetsRaw,
+      displacementFwd,
+      displacementBwd,
+    } = tf.tidy(() => {
+      const {
+        segmentLogits,
+        longOffsets,
+        heatmapScores,
+        offsets,
+        displacementFwd,
+        displacementBwd,
+      } = this.predictForMultiPersonSegmentationAndPartMap(resized);
+      const scaledSegmentScores = scaleAndCropToInputTensorShape(
+          segmentLogits, [height, width], inputResolution,
+          [[padding.top, padding.bottom], [padding.left, padding.right]], true);
+      const longOffsetsResized = false;
+      let scaledLongOffsets;
+      if (longOffsetsResized) {
+        scaledLongOffsets = scaleAndCropToInputTensorShape(
+            longOffsets, [height, width], inputResolution,
+            [[padding.top, padding.bottom], [padding.left, padding.right]],
+            true);
+      } else {
+        scaledLongOffsets = longOffsets;
+      }
+
+      const segmentation =
+          toMask(scaledSegmentScores.squeeze(), config.segmentationThreshold);
+
+      return {
+        segmentation,
+        longOffsets: scaledLongOffsets,
+        heatmapScores,
+        offsetsRaw: offsets,
+        displacementFwd,
+        displacementBwd,
+      };
+    });
+
+    resized.dispose();
+
+    return {
+      segmentation,
+      longOffsets,
+      heatmapScores,
+      offsetsRaw,
+      displacementFwd,
+      displacementBwd,
+      height,
+      width,
+      inputResolution,
+      padding
+    };
   }
 
   /**
@@ -472,85 +535,47 @@ export class BodyPix {
       ...config
     };
     validateMultiPersonInferenceConfig(configWithDefault);
-    const [height, width] = getInputTensorDimensions(input);
-    const inputResolution = this.inputResolution;
 
-    const {resized, padding} =
-        padAndResizeTo(input, [inputResolution, inputResolution]);
     const {
       segmentation,
-      longOffsets,
-      heatmapScoresRaw,
+      heatmapScores,
       offsetsRaw,
-      displacementFwdRaw,
-      displacementBwdRaw,
-    } = tf.tidy(() => {
-      const {
-        segmentLogits,
-        longOffsets,
-        heatmapScores,
-        offsets,
-        displacementFwd,
-        displacementBwd,
-      } = this.predictForMultiPersonSegmentationAndPartMap(resized);
-      const scaledSegmentScores = scaleAndCropToInputTensorShape(
-          segmentLogits, [height, width], [inputResolution, inputResolution],
-          [[padding.top, padding.bottom], [padding.left, padding.right]], true);
-      const longOffsetsResized = false;
-      let scaledLongOffsets;
-      if (longOffsetsResized) {
-        scaledLongOffsets = scaleAndCropToInputTensorShape(
-            longOffsets, [height, width], [inputResolution, inputResolution],
-            [[padding.top, padding.bottom], [padding.left, padding.right]],
-            true);
-      } else {
-        scaledLongOffsets = longOffsets;
-      }
-
-      const segmentation = toMask(
-          scaledSegmentScores.squeeze(),
-          configWithDefault.segmentationThreshold);
-
-      return {
-        segmentation: segmentation,
-        longOffsets: scaledLongOffsets,
-        heatmapScoresRaw: heatmapScores,
-        offsetsRaw: offsets,
-        displacementFwdRaw: displacementFwd,
-        displacementBwdRaw: displacementBwd,
-      };
-    });
+      displacementFwd,
+      displacementBwd,
+      longOffsets,
+      height,
+      width,
+      inputResolution,
+      padding,
+    } = this.estimateMultiplePersonSegmentationActivation(input, config);
 
     const [scoresBuffer, offsetsBuffer, displacementsFwdBuffer, displacementsBwdBuffer] =
-        await toTensorBuffers3D([
-          heatmapScoresRaw, offsetsRaw, displacementFwdRaw, displacementBwdRaw
-        ]);
+        await toTensorBuffers3D(
+            [heatmapScores, offsetsRaw, displacementFwd, displacementBwd]);
 
-    let poses = await decodeMultiplePoses(
+    const poses = decodeMultiplePoses(
         scoresBuffer, offsetsBuffer, displacementsFwdBuffer,
         displacementsBwdBuffer, this.baseModel.outputStride, 5,
         configWithDefault.scoreThreshold, configWithDefault.nmsRadius);
 
-    poses = scaleAndFlipPoses(
-        poses, [height, width], [inputResolution, inputResolution], padding,
-        false);
+    const scaledPoses = scaleAndFlipPoses(
+        poses, [height, width], inputResolution, padding, false);
 
-    const instanceMasks = decodeMultipleMasksGPU(
-        segmentation, longOffsets, poses, height, width,
-        this.baseModel.outputStride, [inputResolution, inputResolution],
+    const personSegmentations = await decodeMultipleMasks(
+        segmentation, longOffsets, scaledPoses, height, width,
+        this.baseModel.outputStride, inputResolution,
         [[padding.top, padding.bottom], [padding.left, padding.right]],
         configWithDefault.scoreThreshold, configWithDefault.refineSteps,
         configWithDefault.minKeypointScore, configWithDefault.maxDetections);
 
-    resized.dispose();
     segmentation.dispose();
     longOffsets.dispose();
-    heatmapScoresRaw.dispose();
+    heatmapScores.dispose();
     offsetsRaw.dispose();
-    displacementFwdRaw.dispose();
-    displacementBwdRaw.dispose();
+    displacementFwd.dispose();
+    displacementBwd.dispose();
 
-    return instanceMasks;
+    return personSegmentations;
   }
 
   /**
@@ -590,7 +615,7 @@ export class BodyPix {
     const {
       resized,
       padding,
-    } = padAndResizeTo(imageTensor, [inputResolution, inputResolution]);
+    } = padAndResizeTo(imageTensor, inputResolution);
 
     const {partSegmentation, heatmapScores, offsets} = tf.tidy(() => {
       const {segmentLogits, partHeatmapLogits, heatmapScores, offsets} =
@@ -663,13 +688,82 @@ export class BodyPix {
         heatmapScores, offsets, this.baseModel.outputStride);
 
     const resultPose = scaleAndFlipPoses(
-        [pose], [height, width], [this.inputResolution, this.inputResolution],
-        padding, configWithDefault.flipHorizontal)[0];
+        [pose], [height, width], this.inputResolution, padding,
+        configWithDefault.flipHorizontal)[0];
 
     heatmapScores.dispose();
     offsets.dispose();
 
     return {height, width, data, pose: resultPose};
+  }
+
+  estimateMultiplePersonPartSegmentationActivation(
+      input: BodyPixInput,
+      config: MultiPersonInferenceConfig = MULTI_PERSON_INFERENCE_CONFIG) {
+    const [height, width] = getInputTensorDimensions(input);
+    const inputResolution = this.inputResolution;
+    const {resized, padding} = padAndResizeTo(input, inputResolution);
+
+    const {
+      segmentation,
+      longOffsets,
+      heatmapScores,
+      offsetsRaw,
+      displacementFwd,
+      displacementBwd,
+      partSegmentation
+    } = tf.tidy(() => {
+      const {
+        segmentLogits,
+        longOffsets,
+        heatmapScores,
+        offsets,
+        displacementFwd,
+        displacementBwd,
+        partHeatmaps,
+      } = this.predictForMultiPersonSegmentationAndPartMap(resized);
+
+      // decoding with scaling.
+      const scaledSegmentScores = scaleAndCropToInputTensorShape(
+          segmentLogits, [height, width], inputResolution,
+          [[padding.top, padding.bottom], [padding.left, padding.right]], true);
+
+      // decoding with scaling.
+      const scaledPartSegmentationScores = scaleAndCropToInputTensorShape(
+          partHeatmaps, [height, width], inputResolution,
+          [[padding.top, padding.bottom], [padding.left, padding.right]], true)
+
+      const scaledLongOffsets = longOffsets;
+      const segmentation =
+          toMask(scaledSegmentScores.squeeze(), config.segmentationThreshold);
+      const partSegmentation =
+          decodeOnlyPartSegmentation(scaledPartSegmentationScores);
+      return {
+        segmentation,
+        longOffsets: scaledLongOffsets,
+        heatmapScores,
+        offsetsRaw: offsets,
+        displacementFwd,
+        displacementBwd,
+        partSegmentation
+      };
+    });
+
+    resized.dispose();
+
+    return {
+      segmentation,
+      longOffsets,
+      heatmapScores,
+      offsetsRaw,
+      displacementFwd,
+      displacementBwd,
+      partSegmentation,
+      height,
+      width,
+      inputResolution,
+      padding
+    };
   }
 
   /**
@@ -699,83 +793,46 @@ export class BodyPix {
       ...config
     };
     validateMultiPersonInferenceConfig(configWithDefault);
-    const [height, width] = getInputTensorDimensions(input);
-    const inputResolution = this.inputResolution;
-    const {resized, padding} =
-        padAndResizeTo(input, [inputResolution, inputResolution]);
+
     const {
       segmentation,
       longOffsets,
-      heatmapScoresRaw,
+      heatmapScores,
       offsetsRaw,
-      displacementFwdRaw,
-      displacementBwdRaw,
+      displacementFwd,
+      displacementBwd,
       partSegmentation,
-    } = tf.tidy(() => {
-      const {
-        segmentLogits,
-        longOffsets,
-        heatmapScores,
-        offsets,
-        displacementFwd,
-        displacementBwd,
-        partHeatmaps
-      } = this.predictForMultiPersonSegmentationAndPartMap(resized);
+      height,
+      width,
+      inputResolution,
+      padding
+    } = this.estimateMultiplePersonPartSegmentationActivation(input, config);
 
-      // decoding with scaling.
-      const scaledSegmentScores = scaleAndCropToInputTensorShape(
-          segmentLogits, [height, width], [inputResolution, inputResolution],
-          [[padding.top, padding.bottom], [padding.left, padding.right]], true);
-
-      // decoding with scaling.
-      const scaledPartSegmentationScores = scaleAndCropToInputTensorShape(
-          partHeatmaps, [height, width], [inputResolution, inputResolution],
-          [[padding.top, padding.bottom], [padding.left, padding.right]], true)
-
-      const scaledLongOffsets = longOffsets;
-      const segmentation = toMask(
-          scaledSegmentScores.squeeze(),
-          configWithDefault.segmentationThreshold);
-      const partSegmentation =
-          decodeOnlyPartSegmentation(scaledPartSegmentationScores);
-      return {
-        segmentation: segmentation,
-        longOffsets: scaledLongOffsets,
-        heatmapScoresRaw: heatmapScores,
-        offsetsRaw: offsets,
-        displacementFwdRaw: displacementFwd,
-        displacementBwdRaw: displacementBwd,
-        partSegmentation: partSegmentation
-      };
-    });
 
     const [scoresBuffer, offsetsBuffer, displacementsFwdBuffer, displacementsBwdBuffer] =
-        await toTensorBuffers3D([
-          heatmapScoresRaw, offsetsRaw, displacementFwdRaw, displacementBwdRaw
-        ]);
+        await toTensorBuffers3D(
+            [heatmapScores, offsetsRaw, displacementFwd, displacementBwd]);
 
-    let poses = await decodeMultiplePoses(
+    let poses = decodeMultiplePoses(
         scoresBuffer, offsetsBuffer, displacementsFwdBuffer,
         displacementsBwdBuffer, this.baseModel.outputStride, 30, 0.3, 20);
 
     poses = scaleAndFlipPoses(
-        poses, [height, width], [inputResolution, inputResolution], padding,
-        false);
+        poses, [height, width], inputResolution, padding, false);
 
-    const instanceMasks = decodeMultiplePartMasksGPU(
+    const instanceMasks = await decodeMultiplePartMasks(
         segmentation, longOffsets, partSegmentation, poses, height, width,
-        this.baseModel.outputStride, [inputResolution, inputResolution],
+        this.baseModel.outputStride, inputResolution,
         [[padding.top, padding.bottom], [padding.left, padding.right]],
         configWithDefault.scoreThreshold, configWithDefault.refineSteps,
         configWithDefault.minKeypointScore, configWithDefault.maxDetections);
 
-    resized.dispose();
     segmentation.dispose();
     longOffsets.dispose();
-    heatmapScoresRaw.dispose();
+    heatmapScores.dispose();
     offsetsRaw.dispose();
-    displacementFwdRaw.dispose();
-    displacementBwdRaw.dispose();
+    displacementFwd.dispose();
+    displacementBwd.dispose();
     partSegmentation.dispose();
 
     return instanceMasks;
@@ -803,7 +860,11 @@ async function loadMobileNet(config: ModelConfig): Promise<BodyPix> {
   const url = mobileNetCheckpoint(outputStride, multiplier, quantBytes);
   const graphModel = await tfconv.loadGraphModel(config.modelUrl || url);
   const mobilenet = new MobileNet(graphModel, outputStride);
-  return new BodyPix(mobilenet, config.inputResolution);
+
+  const validInputResolution = getValidInputResolutionDimensions(
+      config.inputResolution, mobilenet.outputStride);
+
+  return new BodyPix(mobilenet, validInputResolution);
 }
 
 /**
@@ -822,7 +883,10 @@ async function loadResNet(config: ModelConfig): Promise<BodyPix> {
   const url = resNet50Checkpoint(outputStride, quantBytes);
   const graphModel = await tfconv.loadGraphModel(config.modelUrl || url);
   const resnet = new ResNet(graphModel, outputStride);
-  return new BodyPix(resnet, config.inputResolution);
+  const validInputResolution = getValidInputResolutionDimensions(
+      config.inputResolution, resnet.outputStride);
+
+  return new BodyPix(resnet, validInputResolution);
 }
 
 /**

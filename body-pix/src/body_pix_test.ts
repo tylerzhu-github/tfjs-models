@@ -22,6 +22,7 @@ import {describeWithFlags, NODE_ENVS} from '@tensorflow/tfjs-core/dist/jasmine_u
 
 import * as bodyPixModel from './body_pix_model';
 import * as resnet from './resnet';
+import {toValidInputResolution} from './util';
 
 describeWithFlags('BodyPix', NODE_ENVS, () => {
   let bodyPix: bodyPixModel.BodyPix;
@@ -102,4 +103,40 @@ describeWithFlags('BodyPix', NODE_ENVS, () => {
         .then(done)
         .catch(done.fail);
   });
+
+  it('load with resnet when input resolution is a number returns a model ' +
+         'with a valid and the same input resolution width and height',
+     (done) => {
+       const inputResolution = 350;
+       const validInputResolution =
+           toValidInputResolution(inputResolution, outputStride);
+
+       const expectedResolution = [validInputResolution, validInputResolution];
+
+       bodyPixModel
+           .load({architecture: 'ResNet50', outputStride, inputResolution})
+           .then(model => {
+             expect(model.inputResolution).toEqual(expectedResolution);
+
+             done();
+           });
+     });
+  it('load with resnet when input resolution is an object with width and height ' +
+         'returns a model with a valid resolution for the width and height',
+     (done) => {
+       const inputResolution = {width: 700, height: 500};
+
+       const expectedResolution = [
+         toValidInputResolution(inputResolution.height, outputStride),
+         toValidInputResolution(inputResolution.width, outputStride)
+       ];
+
+       bodyPixModel
+           .load({architecture: 'ResNet50', outputStride, inputResolution})
+           .then(model => {
+             expect(model.inputResolution).toEqual(expectedResolution);
+
+             done();
+           });
+     });
 });

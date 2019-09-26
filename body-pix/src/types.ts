@@ -57,5 +57,7 @@ export declare type Color = {
   r: number,
   g: number,
   b: number,
-  a: number,
-};
+  a: number
+}
+
+export declare type InputResolution = number | {width: number, height: number};

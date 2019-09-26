@@ -15,6 +15,7 @@
  * =============================================================================
  */
 import * as bodyPix from '@tensorflow-models/body-pix';
+import {getBackend, setBackend} from '@tensorflow/tfjs-core';
 import dat from 'dat.gui';
 import Stats from 'stats.js';
 
@@ -98,6 +99,14 @@ function getFacingMode(cameraLabel) {
   }
 }
 
+function getBackendFromQueryString() {
+  if (!window.URLSearchParams) return 'gpu';
+
+  const urlParams = new URLSearchParams(window.location.search);
+
+  return urlParams.get('backend') === 'cpu' ? 'cpu' : 'gpu';
+}
+
 async function getConstraints(cameraLabel) {
   let deviceId;
   let facingMode;
@@ -159,7 +168,7 @@ const guiState = {
   camera: null,
   flipHorizontal: true,
   input: {
-    architecture: 'ResNet50',
+    architecture: 'MobileNetV1',
     outputStride: 16,
     inputResolution: 257,
     multiplier: 1.0,
@@ -570,6 +579,15 @@ async function estimatePartSegmentation() {
   return allPersonPartSegmentation;
 }
 
+async function getAndSetBackend() {
+  const backend = getBackendFromQueryString();
+
+  if (backend === 'cpu') {
+    await setBackend('cpu')
+  }
+  // by default, gpu backend is used, so no need to set it.
+}
+
 async function loadBodyPix() {
   toggleLoadingUI(true);
   state.net = await bodyPix.load({
@@ -623,7 +641,8 @@ function segmentBodyInRealTime() {
             const foregroundColor = {r: 255, g: 255, b: 255, a: 255};
             const backgroundColor = {r: 0, g: 0, b: 0, a: 255};
             const mask = bodyPix.toMultiPersonMaskImageData(
-                multiPersonSegmentation, foregroundColor, backgroundColor, true);
+                multiPersonSegmentation, foregroundColor, backgroundColor,
+                true);
 
             bodyPix.drawMask(
                 canvas, state.video, mask, guiState.segmentation.opacity,
@@ -697,9 +716,12 @@ function segmentBodyInRealTime() {
  */
 export async function bindPage() {
   // Load the BodyPix model weights with architecture 0.75
+  await getAndSetBackend();
   await loadBodyPix();
   document.getElementById('loading').style.display = 'none';
   document.getElementById('main').style.display = 'inline-block';
+
+  console.log('using backend', getBackend());
 
   await loadVideo(guiState.camera);
 
