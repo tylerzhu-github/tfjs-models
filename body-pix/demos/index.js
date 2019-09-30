@@ -721,8 +721,6 @@ export async function bindPage() {
   document.getElementById('loading').style.display = 'none';
   document.getElementById('main').style.display = 'inline-block';
 
-  console.log('using backend', getBackend());
-
   await loadVideo(guiState.camera);
 
   let cameras = await getVideoInputs();
