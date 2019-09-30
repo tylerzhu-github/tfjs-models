@@ -15,7 +15,7 @@
  * =============================================================================
  */
 import * as bodyPix from '@tensorflow-models/body-pix';
-import {getBackend, setBackend} from '@tensorflow/tfjs-core';
+import {setBackend} from '@tensorflow/tfjs-core';
 import dat from 'dat.gui';
 import Stats from 'stats.js';
 
@@ -99,12 +99,15 @@ function getFacingMode(cameraLabel) {
   }
 }
 
+const GPU_BACKEND = 'gpu';
+const CPU_BACKEND = 'cpu';
+
 function getBackendFromQueryString() {
-  if (!window.URLSearchParams) return 'gpu';
+  if (!window.URLSearchParams) return GPU_BACKEND;
 
   const urlParams = new URLSearchParams(window.location.search);
 
-  return urlParams.get('backend') === 'cpu' ? 'cpu' : 'gpu';
+  return urlParams.get('backend') === 'cpu' ? CPU_BACKEND : GPU_BACKEND;
 }
 
 async function getConstraints(cameraLabel) {
@@ -582,8 +585,8 @@ async function estimatePartSegmentation() {
 async function getAndSetBackend() {
   const backend = getBackendFromQueryString();
 
-  if (backend === 'cpu') {
-    await setBackend('cpu')
+  if (backend === CPU_BACKEND) {
+    await setBackend(CPU_BACKEND)
   }
   // by default, gpu backend is used, so no need to set it.
 }
