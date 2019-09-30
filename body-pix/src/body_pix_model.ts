@@ -23,7 +23,7 @@ import {mobileNetCheckpoint, resNet50Checkpoint} from './checkpoints';
 import {decodeOnlyPartSegmentation, decodePartSegmentation, toMask} from './decode_part_map';
 import {MobileNetMultiplier} from './mobilenet';
 import {MobileNet} from './mobilenet';
-import {decodeMultipleMasks, decodeMultiplePartMasks} from './multi_person/decode_multiple_masks';
+import {decodePartMasksForPoses, decodePersonSegmentationMasksForPoses} from './multi_person/decode_masks_for_poses';
 import {decodeMultiplePoses} from './multi_person/decode_multiple_poses';
 import {ResNet} from './resnet';
 import {decodeSinglePose} from './sinlge_person/decode_single_pose';
@@ -561,7 +561,7 @@ export class BodyPix {
     const scaledPoses = scaleAndFlipPoses(
         poses, [height, width], inputResolution, padding, false);
 
-    const personSegmentations = await decodeMultipleMasks(
+    const personSegmentations = await decodePersonSegmentationMasksForPoses(
         segmentation, longOffsets, scaledPoses, height, width,
         this.baseModel.outputStride, inputResolution,
         [[padding.top, padding.bottom], [padding.left, padding.right]],
@@ -820,7 +820,7 @@ export class BodyPix {
     poses = scaleAndFlipPoses(
         poses, [height, width], inputResolution, padding, false);
 
-    const instanceMasks = await decodeMultiplePartMasks(
+    const instanceMasks = await decodePartMasksForPoses(
         segmentation, longOffsets, partSegmentation, poses, height, width,
         this.baseModel.outputStride, inputResolution,
         [[padding.top, padding.bottom], [padding.left, padding.right]],
