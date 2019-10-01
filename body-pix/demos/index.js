@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2018 Google Inc. All Rights Reserved.
+ * Copyright 2019 Google Inc. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -19,7 +19,7 @@ import {setBackend} from '@tensorflow/tfjs-core';
 import dat from 'dat.gui';
 import Stats from 'stats.js';
 
-import {drawKeypoints, drawSkeleton, toggleLoadingUI, tryResNetButtonName, tryResNetButtonText, updateTryResNetButtonDatGuiCss} from './demo_util';
+import {drawKeypoints, drawSkeleton, toggleLoadingUI, TRY_RESNET_BUTTON_NAME, TRY_RESNET_BUTTON_TEXT, updateTryResNetButtonDatGuiCss} from './demo_util';
 import * as partColorScales from './part_color_scales';
 
 
@@ -165,6 +165,16 @@ async function loadVideo(cameraLabel) {
   state.video.play();
 }
 
+const defaultQuantBytes = 2;
+
+const defaultMobileNetMultiplier = isMobile() ? 0.50 : 0.75;
+const defaultMobileNetStride = 16;
+const defaultMobileNetInputResolution = 513;
+
+const defaultResNetMultiplier = 1.0;
+const defaultResNetStride = 16;
+const defaultResNetInputResolution = 257;
+
 const guiState = {
   algorithm: 'multi-person',
   estimate: 'partmap',
@@ -222,10 +232,10 @@ function setupGui(cameras) {
   const gui = new dat.GUI({width: 300});
 
   let architectureController = null;
-  guiState[tryResNetButtonName] = function() {
+  guiState[TRY_RESNET_BUTTON_NAME] = function() {
     architectureController.setValue('ResNet50')
   };
-  gui.add(guiState, tryResNetButtonName).name(tryResNetButtonText);
+  gui.add(guiState, TRY_RESNET_BUTTON_NAME).name(TRY_RESNET_BUTTON_TEXT);
   updateTryResNetButtonDatGuiCss();
 
   gui.add(guiState, 'camera', toCameraOptions(cameras))
@@ -252,19 +262,6 @@ function setupGui(cameras) {
   let input = gui.addFolder('Input');
 
 
-  // Output stride:  Internally, this parameter affects the height and width
-  // of the layers in the neural network. The lower the value of the output
-  // stride the higher the accuracy but slower the speed, the higher the value
-  // the faster the speed but lower the accuracy.
-  const defaultQuantBytes = 2;
-
-  const defaultMobileNetMultiplier = isMobile() ? 0.50 : 0.75;
-  const defaultMobileNetStride = 16;
-  const defaultMobileNetInputResolution = 513;
-
-  const defaultResNetMultiplier = 1.0;
-  const defaultResNetStride = 32;
-  const defaultResNetInputResolution = 257;
 
   // Updates outputStride
   // Output stride:  Internally, this parameter affects the height and width of
@@ -527,7 +524,6 @@ function setupFPS() {
 
 async function estimateSegmentation() {
   let multiPersonSegmentation = null;
-  console.log(guiState.algorithm);
   switch (guiState.algorithm) {
     case 'multi-person':
       multiPersonSegmentation =
@@ -555,10 +551,10 @@ async function estimateSegmentation() {
 }
 
 async function estimatePartSegmentation() {
-  let allPersonPartSegmentation = null;
+  let multiPersonPartSegmentation = null;
   switch (guiState.algorithm) {
     case 'multi-person':
-      allPersonPartSegmentation =
+      multiPersonPartSegmentation =
           await state.net.estimateMultiplePersonPartSegmentation(state.video, {
             segmentationThreshold: guiState.segmentation.segmentationThreshold,
             maxDetections: guiState.multiPersonDecoding.maxDetections,
@@ -574,12 +570,12 @@ async function estimatePartSegmentation() {
           await state.net.estimateSinglePersonPartSegmentation(state.video, {
             segmentationThreshold: guiState.segmentation.segmentationThreshold
           });
-      allPersonPartSegmentation = [personPartSegmentation];
+      multiPersonPartSegmentation = [personPartSegmentation];
       break;
     default:
       break;
   };
-  return allPersonPartSegmentation;
+  return multiPersonPartSegmentation;
 }
 
 async function getAndSetBackend() {
@@ -671,9 +667,9 @@ function segmentBodyInRealTime() {
         break;
       case 'partmap':
         const ctx = canvas.getContext('2d');
-        const allPersonPartSegmentation = await estimatePartSegmentation();
+        const multiPersonPartSegmentation = await estimatePartSegmentation();
         const coloredPartImageData = bodyPix.toMultiPersonColoredPartImageData(
-            allPersonPartSegmentation,
+            multiPersonPartSegmentation,
             partColorScales[guiState.partMap.colorScale]);
 
         const maskBlurAmount = 0;
@@ -690,7 +686,7 @@ function segmentBodyInRealTime() {
               maskBlurAmount, flipHorizontally);
         }
 
-        allPersonPartSegmentation.forEach(personPartSegmentation => {
+        multiPersonPartSegmentation.forEach(personPartSegmentation => {
           let pose = personPartSegmentation.pose;
           if (flipHorizontally) {
             pose =

@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2018 Google LLC. All Rights Reserved.
+ * Copyright 2019 Google LLC. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -171,10 +171,10 @@ export function toMaskImageData(
  * other words, pixels where there is a person will be colored with foreground
  * color and where there is not a person will be colored with background color.
  *
- * @param multiPersonSegmentation The output from estimateMultiPersonSegmentation;
- * An array of PersonSegmentation object, each containing a width, height, and a
- * binary array with 1 for the pixels that are part of the person, and 0
- * otherwise.
+ * @param multiPersonSegmentation The output from
+ * estimateMultiPersonSegmentation; An array of PersonSegmentation object, each
+ * containing a width, height, and a binary array with 1 for the pixels that are
+ * part of the person, and 0 otherwise.
  *
  * @param foreground The foreground color (r,g,b,a) for visualizing pixels that
  * belong to people.
@@ -211,6 +211,39 @@ export function toMultiPersonMaskImageData(
   const {width, height} = multiPersonSegmentation[0];
   const bytes = new Uint8ClampedArray(width * height * 4);
 
+  function drawStroke(
+      bytes: Uint8ClampedArray, row: number, column: number, width: number,
+      radius: number, color: Color = {r: 0, g: 255, b: 255, a: 255}) {
+    for (let i = -radius; i <= radius; i++) {
+      for (let j = -radius; j <= radius; j++) {
+        if (i !== 0 && j !== 0) {
+          const n = (row + i) * width + (column + j);
+          bytes[4 * n + 0] = color.r;
+          bytes[4 * n + 1] = color.g;
+          bytes[4 * n + 2] = color.b;
+          bytes[4 * n + 3] = color.a;
+        }
+      }
+    }
+  }
+
+  function isSegmentationBoundary(
+      segmentationData: Uint8Array, row: number, column: number, width: number,
+      radius = 1): boolean {
+    let numberBackgroundPixels = 0;
+    for (let i = -radius; i <= radius; i++) {
+      for (let j = -radius; j <= radius; j++) {
+        if (i !== 0 && j !== 0) {
+          const n = (row + i) * width + (column + j);
+          if (segmentationData[n] !== 1) {
+            numberBackgroundPixels += 1;
+          }
+        }
+      }
+    }
+    return numberBackgroundPixels > 0;
+  }
+
   for (let i = 0; i < height; i += 1) {
     for (let j = 0; j < width; j += 1) {
       const n = i * width + j;
@@ -224,34 +257,11 @@ export function toMultiPersonMaskImageData(
           bytes[4 * n + 1] = foreground.g;
           bytes[4 * n + 2] = foreground.b;
           bytes[4 * n + 3] = foreground.a;
-
-          if (drawContour) {
-            // checks boundary
-            if (i - 1 >= 0 && i + 1 < height && j - 1 >= 0 && j + 1 < width) {
-              const n11 = (i - 1) * width + j - 1;
-              const n12 = (i - 1) * width + j;
-              const n13 = (i - 1) * width + j + 1;
-              const n21 = i * width + j - 1;
-              const n23 = i * width + j + 1;
-              const n31 = (i + 1) * width + j - 1;
-              const n32 = (i + 1) * width + j;
-              const n33 = (i + 1) * width + j + 1;
-              if (multiPersonSegmentation[k].data[n11] !== 1 ||
-                  multiPersonSegmentation[k].data[n12] !== 1 ||
-                  multiPersonSegmentation[k].data[n13] !== 1 ||
-                  multiPersonSegmentation[k].data[n21] !== 1 ||
-                  multiPersonSegmentation[k].data[n23] !== 1 ||
-                  multiPersonSegmentation[k].data[n31] !== 1 ||
-                  multiPersonSegmentation[k].data[n32] !== 1 ||
-                  multiPersonSegmentation[k].data[n33] !== 1) {
-                for (let nn
-                         of [n, n11, n12, n13, n21, n23, n31, n31, n32, n33]) {
-                  bytes[4 * nn + 0] = 0;
-                  bytes[4 * nn + 1] = 255;
-                  bytes[4 * nn + 2] = 255;
-                }
-              }
-            }
+          const isBoundary = isSegmentationBoundary(
+              multiPersonSegmentation[k].data, i, j, width)
+          if (drawContour && i - 1 >= 0 && i + 1 < height && j - 1 >= 0 &&
+              j + 1 < width && isBoundary) {
+            drawStroke(bytes, i, j, width, 1);
           }
         }
       }
@@ -288,7 +298,7 @@ export function toColoredPartImageData(
  * of colors indexed by part id, generates an image with the corresponding color
  * for each part at each pixel, and white pixels where there is no part.
  *
- * @param allPartSegmentation The output from
+ * @param multiPersonPartSegmentation The output from
  * estimateMultiPersonPartSegmentation; an array of PartSegmentation object
  * containing a width, height, and an array with a part id from 0-24 for the
  * pixels that are part of a corresponding body part, and -1 otherwise.
@@ -297,25 +307,24 @@ export function toColoredPartImageData(
  * part id.  Must have 24 colors, one for every part.
  *
  * @returns An ImageData with the same width and height of all the element in
- * allPartSegmentation, with the corresponding color for each part at each
- * pixel, and black pixels where there is no part.
+ * multiPersonPartSegmentation, with the corresponding color for each part at
+ * each pixel, and black pixels where there is no part.
  */
 export function toMultiPersonColoredPartImageData(
-    multiPersonSegmentation: PartSegmentation[],
+    multiPersonPartSegmentation: PartSegmentation[],
     partColors: Array<[number, number, number]>): ImageData {
-  const {width, height} = multiPersonSegmentation[0];
+  const {width, height} = multiPersonPartSegmentation[0];
   const bytes = new Uint8ClampedArray(width * height * 4);
 
   for (let i = 0; i < height * width; ++i) {
-    // invert mask.  Invert the segmentatino mask.
-    // const partId = Math.round(data[i]);
+    // invert mask.  Invert the segmentation mask.
     const j = i * 4;
     bytes[j + 0] = 255;
     bytes[j + 1] = 255;
     bytes[j + 2] = 255;
     bytes[j + 3] = 255;
-    for (let k = 0; k < multiPersonSegmentation.length; k++) {
-      const partId = multiPersonSegmentation[k].data[i];
+    for (let k = 0; k < multiPersonPartSegmentation.length; k++) {
+      const partId = multiPersonPartSegmentation[k].data[i];
       if (partId !== -1) {
         const color = partColors[partId];
         if (!color) {

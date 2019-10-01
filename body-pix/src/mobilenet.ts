@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2018 Google Inc. All Rights Reserved.
+ * Copyright 2019 Google Inc. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -46,11 +46,19 @@ export function assertValidResolution(resolution: any, outputStride: number) {
 
 function toFloatIfInt(input: tf.Tensor3D): tf.Tensor3D {
   return tf.tidy(() => {
-    if (input.dtype === 'int32') input = input.toFloat();
+    if (input.dtype === 'int32') {
+      input = input.toFloat();
+    }
+    return input;
+  });
+}
+
+function processInput(input: tf.Tensor3D): tf.Tensor3D {
+  return tf.tidy(() => {
     // Normalize the pixels [0, 255] to be between [-1, 1].
     input = tf.div(input, 127.5);
     return tf.sub(input, 1.0);
-  })
+  });
 }
 
 export class MobileNet implements BaseModel {
@@ -70,7 +78,7 @@ export class MobileNet implements BaseModel {
 
   predict(input: tf.Tensor3D): {[key: string]: tf.Tensor3D} {
     return tf.tidy(() => {
-      const asFloat = toFloatIfInt(input);
+      const asFloat = processInput(toFloatIfInt(input));
       const asBatch = asFloat.expandDims(0);
       const [
           offsets4d,
