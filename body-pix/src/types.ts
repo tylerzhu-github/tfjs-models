@@ -1,3 +1,4 @@
+import * as posenet from '@tensorflow-models/posenet';
 import * as tf from '@tensorflow/tfjs-core';
 
 export type BodyPixInput =
@@ -36,22 +37,6 @@ export declare type Vector2D = {
 
 export type TensorBuffer3D = tf.TensorBuffer<tf.Rank.R3>;
 
-export declare type PartWithScore = {
-  score: number,
-  part: Part
-};
-
-export declare type Keypoint = {
-  score: number,
-  position: Vector2D,
-  part: string
-};
-
-export declare type Pose = {
-  keypoints: Keypoint[],
-  score: number,
-};
-
 
 export declare type Color = {
   r: number,
@@ -59,3 +44,5 @@ export declare type Color = {
   b: number,
   a: number,
 };
+
+export declare type Pose = posenet.Pose;
