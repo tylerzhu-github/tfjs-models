@@ -7,7 +7,7 @@ algorithm.
 This package is different from the other packages in this repository in that it
 doesn't provide a model with weights, but rather a utility for constructing a
 KNN model using activations from another model or any other tensors you can
-associate with a class.
+associate with a class/label.
 
 You can see example code [here](https://github.com/tensorflow/tfjs-models/tree/master/knn-classifier/demo).
 
@@ -19,11 +19,11 @@ You can see example code [here](https://github.com/tensorflow/tfjs-models/tree/m
 <html>
   <head>
     <!-- Load TensorFlow.js -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.11.7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <!-- Load MobileNet -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@0.1.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet"></script>
     <!-- Load KNN Classifier -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier"></script>
  </head>
 
   <body>
@@ -42,16 +42,16 @@ You can see example code [here](https://github.com/tensorflow/tfjs-models/tree/m
       const mobilenetModule = await mobilenet.load();
 
       // Add MobileNet activations to the model repeatedly for all classes.
-      const img0 = tf.fromPixels(document.getElementById('class0'));
+      const img0 = tf.browser.fromPixels(document.getElementById('class0'));
       const logits0 = mobilenetModule.infer(img0, 'conv_preds');
       classifier.addExample(logits0, 0);
 
-      const img1 = tf.fromPixels(document.getElementById('class1'));
+      const img1 = tf.browser.fromPixels(document.getElementById('class1'));
       const logits1 = mobilenetModule.infer(img1, 'conv_preds');
       classifier.addExample(logits1, 1);
 
       // Make a prediction.
-      const x = tf.fromPixels(document.getElementById('test'));
+      const x = tf.browser.fromPixels(document.getElementById('test'));
       const xlogits = mobilenetModule.infer(x, 'conv_preds');
       console.log('Predictions:');
       const result = await classifier.predictClass(xlogits);
@@ -78,16 +78,16 @@ const classifier = knnClassifier.create();
 const mobilenet = await mobilenetModule.load();
 
 // Add MobileNet activations to the model repeatedly for all classes.
-const img0 = tf.fromPixels(document.getElementById('class0'));
+const img0 = tf.browser.fromPixels(document.getElementById('class0'));
 const logits0 = mobilenet.infer(img0, 'conv_preds');
 classifier.addExample(logits0, 0);
 
-const img1 = tf.fromPixels(document.getElementById('class1'));
+const img1 = tf.browser.fromPixels(document.getElementById('class1'));
 const logits1 = mobilenet.infer(img1, 'conv_preds');
 classifier.addExample(logits1, 1);
 
 // Make a prediction.
-const x = tf.fromPixels(document.getElementById('test'));
+const x = tf.browser.fromPixels(document.getElementById('test'));
 const xlogits = mobilenet.infer(x, 'conv_preds');
 console.log('Predictions:');
 console.log(classifier.predictClass(xlogits));
@@ -110,14 +110,14 @@ Returns a `KNNImageClassifier`.
 ```ts
 classifier.addExample(
   example: tf.Tensor,
-  classIndex: number
+  label: number|string
 ): void;
 ```
 
 Args:
 - **example:** An example to add to the dataset, usually an activation from
   another model.
-- **classIndex:** The class index of the example.
+- **label:** The label (class name) of the example.
 
 #### Making a prediction
 
@@ -125,7 +125,7 @@ Args:
 classifier.predictClass(
   input: tf.Tensor,
   k = 3
-): Promise<{classIndex: number, confidences: {[classId: number]: number}}>;
+): Promise<{label: string, classIndex: number, confidences: {[classId: number]: number}}>;
 ```
 
 Args:
@@ -136,19 +136,21 @@ Args:
   the class that appears the most as the final prediction for the input example.
   Defaults to 3. If examples < k, k = examples.
 
-Returns an object with a top classIndex, and confidences mapping all class
-indices to their confidence.
+Returns an object where:
+ - `label`: the label (class name) with the most confidence.
+ - `classIndex`: the 0-based index of the class (for backwards compatibility).
+ - `confidences`: maps each label to their confidence score.
 
 #### Misc
 
 ##### Clear all examples for a class.
 
 ```ts
-classifier.clearClass(classIndex: number)
+classifier.clearClass(label: number|string)
 ```
 
 Args:
-- **classIndex:** The class to clear all examples for.
+- **label:** The label to clear all examples for.
 
 ##### Clear all examples from all classes
 
@@ -159,25 +161,25 @@ classifier.clearAllClasses()
 ##### Get the example count for each class
 
 ```ts
-classifier.getClassExampleCount(): {[classId: number]: number}
+classifier.getClassExampleCount(): {[label: string]: number}
 ```
 
-Returns an object that maps classId to example count for that class.
+Returns an object that maps label name to example count for that label.
 
 ##### Get the full dataset, useful for saving state.
 
 ```ts
-classifier.getClassifierDataset(): {[classId: number]: Tensor2D}
+classifier.getClassifierDataset(): {[label: string]: Tensor2D}
 ```
 
 ##### Set the full dataset, useful for restoring state.
 
 ```ts
-classifier.setClassifierDataset(dataset: {[classId: number]: Tensor2D})
+classifier.setClassifierDataset(dataset: {[label: string]: Tensor2D})
 ```
 
 Args:
-- **dataset:** The class dataset matrices map. Can be retrieved from
+- **dataset:** The label dataset matrices map. Can be retrieved from
   getClassDatsetMatrices. Useful for restoring state.
 
 ##### Get the total number of classes

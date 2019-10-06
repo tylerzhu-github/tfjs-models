@@ -16,12 +16,10 @@
  */
 
 import * as tf from '@tensorflow/tfjs';
-import {TensorContainer} from '@tensorflow/tfjs-core/dist/tensor_types';
-
 import {normalize} from './browser_fft_utils';
-import {arrayBuffer2String, concatenateArrayBuffers, getUID, string2ArrayBuffer} from './generic_utils';
+import {arrayBuffer2String, concatenateArrayBuffers, getRandomInteger, getUID, string2ArrayBuffer} from './generic_utils';
 import {balancedTrainValSplitNumArrays} from './training_utils';
-import {Example, SpectrogramData} from './types';
+import {AudioDataAugmentationOptions, Example, SpectrogramData} from './types';
 
 // Descriptor for serialized dataset files: stands for:
 //   TensorFlow.js Speech-Commands Dataset.
@@ -95,7 +93,7 @@ export const BACKGROUND_NOISE_TAG = '_background_noise_';
 /**
  * Configuration for getting spectrograms as tensors.
  */
-export interface GetDataConfig {
+export interface GetDataConfig extends AudioDataAugmentationOptions {
   /**
    * Number of frames.
    *
@@ -174,7 +172,7 @@ export interface GetDataConfig {
 }
 
 // tslint:disable-next-line:no-any
-export type SpectrogramAndTargetsTfDataset = tf.data.Dataset<TensorContainer>;
+export type SpectrogramAndTargetsTfDataset = tf.data.Dataset<{}>;
 
 /**
  * A serializable, mutable set of speech/audio `Example`s;
@@ -222,10 +220,10 @@ export class Dataset {
    * @returns The UID for the added `Example`.
    */
   addExample(example: Example): string {
-    tf.util.assert(example != null, 'Got null or undefined example');
+    tf.util.assert(example != null, () => 'Got null or undefined example');
     tf.util.assert(
         example.label != null && example.label.length > 0,
-        `Expected label to be a non-empty string, ` +
+        () => `Expected label to be a non-empty string, ` +
             `but got ${JSON.stringify(example.label)}`);
     const uid = getUID();
     this.examples[uid] = example;
@@ -242,7 +240,8 @@ export class Dataset {
    * @param dataset The incoming dataset to be merged into this dataset.
    */
   merge(dataset: Dataset): void {
-    tf.util.assert(dataset !== this, 'Cannot merge a dataset into itself');
+    tf.util.assert(
+        dataset !== this, () => 'Cannot merge a dataset into itself');
     const vocab = dataset.getVocabulary();
     for (const word of vocab) {
       const examples = dataset.getExamples(word);
@@ -281,10 +280,11 @@ export class Dataset {
   getExamples(label: string): Array<{uid: string, example: Example}> {
     tf.util.assert(
         label != null,
-        `Expected label to be a string, but got ${JSON.stringify(label)}`);
+        () =>
+            `Expected label to be a string, but got ${JSON.stringify(label)}`);
     tf.util.assert(
         label in this.label2Ids,
-        `No example of label "${label}" exists in dataset`);
+        () => `No example of label "${label}" exists in dataset`);
     const output: Array<{uid: string, example: Example}> = [];
     this.label2Ids[label].forEach(id => {
       output.push({uid: id, example: this.examples[id]});
@@ -325,19 +325,20 @@ export class Dataset {
   }|[SpectrogramAndTargetsTfDataset, SpectrogramAndTargetsTfDataset] {
     tf.util.assert(
         this.size() > 0,
-        `Cannot get spectrograms as tensors because the dataset is empty`);
+        () =>
+            `Cannot get spectrograms as tensors because the dataset is empty`);
     const vocab = this.getVocabulary();
     if (label != null) {
       tf.util.assert(
           vocab.indexOf(label) !== -1,
-          `Label ${label} is not in the vocabulary ` +
+          () => `Label ${label} is not in the vocabulary ` +
               `(${JSON.stringify(vocab)})`);
     } else {
       // If all words are requested, there must be at least two words in the
       // vocabulary to make one-hot encoding possible.
       tf.util.assert(
           vocab.length > 1,
-          `One-hot encoding of labels requires the vocabulary to have ` +
+          () => `One-hot encoding of labels requires the vocabulary to have ` +
               `at least two words, but it has only ${vocab.length} word.`);
     }
 
@@ -358,19 +359,21 @@ export class Dataset {
       numFrames = config.numFrames;
       tf.util.assert(
           numFrames != null && Number.isInteger(numFrames) && numFrames > 0,
-          `There are ${sortedUniqueNumFrames.length} unique lengths among ` +
+          () => `There are ${
+                    sortedUniqueNumFrames.length} unique lengths among ` +
               `the ${this.size()} examples of this Dataset, hence numFrames ` +
               `is required. But it is not provided.`);
       tf.util.assert(
           numFrames <= sortedUniqueNumFrames[0],
-          `numFrames (${numFrames}) exceeds the minimum numFrames ` +
+          () => `numFrames (${numFrames}) exceeds the minimum numFrames ` +
               `(${sortedUniqueNumFrames[0]}) among the examples of ` +
               `the Dataset.`);
 
       hopFrames = config.hopFrames;
       tf.util.assert(
           hopFrames != null && Number.isInteger(hopFrames) && hopFrames > 0,
-          `There are ${sortedUniqueNumFrames.length} unique lengths among ` +
+          () => `There are ${
+                    sortedUniqueNumFrames.length} unique lengths among ` +
               `the ${this.size()} examples of this Dataset, hence hopFrames ` +
               `is required. But it is not provided.`);
     }
@@ -381,7 +384,6 @@ export class Dataset {
     return tf.tidy(() => {
       let xTensors: tf.Tensor3D[] = [];
       let xArrays: Float32Array[] = [];
-      let yArrays: number[] = [];
 
       let labelIndices: number[] = [];
       let uniqueFrameSize: number;
@@ -400,7 +402,7 @@ export class Dataset {
           } else {
             tf.util.assert(
                 frameSize === uniqueFrameSize,
-                `Mismatch in frameSize  ` +
+                () => `Mismatch in frameSize  ` +
                     `(${frameSize} vs ${uniqueFrameSize})`);
           }
 
@@ -427,7 +429,6 @@ export class Dataset {
               // TODO(cais): See if we can do away with dataSync();
               // TODO(cais): Shuffling?
               xArrays.push(windowedSnippet.dataSync() as Float32Array);
-              yArrays.push(i);
             } else {
               xTensors.push(windowedSnippet as tf.Tensor3D);
             }
@@ -437,6 +438,13 @@ export class Dataset {
           }
           tf.dispose(snippet);  // For memory saving.
         }
+      }
+
+      if (config.augmentByMixingNoiseRatio != null) {
+        this.augmentByMixingNoise(
+            config.getDataset ? xArrays : xTensors as
+                Array<Float32Array | tf.Tensor>,
+            labelIndices, config.augmentByMixingNoiseRatio);
       }
 
       const shuffle = config.shuffle == null ? true : config.shuffle;
@@ -450,15 +458,14 @@ export class Dataset {
             config.datasetValidationSplit;
         tf.util.assert(
             valSplit > 0 && valSplit < 1,
-            `Invalid dataset validation split: ${valSplit}`);
+            () => `Invalid dataset validation split: ${valSplit}`);
 
         const zippedXandYArrays =
-            xArrays.map((xArray, i) => [xArray, yArrays[i]]);
+            xArrays.map((xArray, i) => [xArray, labelIndices[i]]);
         tf.util.shuffle(
             zippedXandYArrays);  // Shuffle the data before splitting.
         xArrays = zippedXandYArrays.map(item => item[0]) as Float32Array[];
-        yArrays = zippedXandYArrays.map(item => item[1]) as number[];
-
+        const yArrays = zippedXandYArrays.map(item => item[1]) as number[];
         const {trainXs, trainYs, valXs, valYs} =
             balancedTrainValSplitNumArrays(xArrays, yArrays, valSplit);
 
@@ -466,23 +473,27 @@ export class Dataset {
         // for tf.data currently. Tighten the types when the tf.data bug is
         // fixed.
         // tslint:disable:no-any
-        const xTrain = tf.data.array(trainXs as any).map(
-            x => tf.tensor3d(x as any, [numFrames, uniqueFrameSize, 1]));
+        const xTrain =
+            tf.data.array(trainXs as any).map(x => tf.tensor3d(x as any, [
+              numFrames, uniqueFrameSize, 1
+            ]));
         const yTrain = tf.data.array(trainYs).map(
             y => tf.oneHot([y], vocab.length).squeeze([0]));
         // TODO(cais): See if we can tighten the typing.
-        let trainDataset = tf.data.zip([xTrain, yTrain]);
+        let trainDataset = tf.data.zip({xs: xTrain, ys: yTrain});
         if (shuffle) {
           // Shuffle the dataset.
           trainDataset = trainDataset.shuffle(xArrays.length);
         }
         trainDataset = trainDataset.batch(batchSize).prefetch(4);
 
-        const xVal = tf.data.array(valXs as any).map(
-            x => tf.tensor3d(x as any, [numFrames, uniqueFrameSize, 1]));
+        const xVal =
+            tf.data.array(valXs as any).map(x => tf.tensor3d(x as any, [
+              numFrames, uniqueFrameSize, 1
+            ]));
         const yVal = tf.data.array(valYs).map(
             y => tf.oneHot([y], vocab.length).squeeze([0]));
-        let valDataset = tf.data.zip([xVal, yVal]);
+        let valDataset = tf.data.zip({xs: xVal, ys: yVal});
         valDataset = valDataset.batch(batchSize).prefetch(4);
         // tslint:enable:no-any
 
@@ -510,6 +521,56 @@ export class Dataset {
         };
       }
     });
+  }
+
+  private augmentByMixingNoise<T extends tf.Tensor | Float32Array>(
+      xs: T[], labelIndices: number[], ratio: number): void {
+    if (xs == null || xs.length === 0) {
+      throw new Error(
+          `Cannot perform augmentation because data is null or empty`);
+    }
+    const isTypedArray = xs[0] instanceof Float32Array;
+
+    const vocab = this.getVocabulary();
+    const noiseExampleIndices: number[] = [];
+    const wordExampleIndices: number[] = [];
+    for (let i = 0; i < labelIndices.length; ++i) {
+      if (vocab[labelIndices[i]] === BACKGROUND_NOISE_TAG) {
+        noiseExampleIndices.push(i);
+      } else {
+        wordExampleIndices.push(i);
+      }
+    }
+    if (noiseExampleIndices.length === 0) {
+      throw new Error(
+          `Cannot perform augmentation by mixing with noise when ` +
+          `there is no example with label ${BACKGROUND_NOISE_TAG}`);
+    }
+
+    const mixedXTensors: Array<tf.Tensor | Float32Array> = [];
+    const mixedLabelIndices: number[] = [];
+    for (const index of wordExampleIndices) {
+      const noiseIndex =  // Randomly sample from the noises, with replacement.
+          noiseExampleIndices[getRandomInteger(0, noiseExampleIndices.length)];
+      const signalTensor = isTypedArray ?
+          tf.tensor1d(xs[index] as Float32Array) : xs[index] as tf.Tensor;
+      const noiseTensor = isTypedArray ?
+          tf.tensor1d(xs[noiseIndex] as Float32Array) :
+          xs[noiseIndex] as tf.Tensor;
+      const mixed: tf.Tensor = tf.tidy(() =>
+          normalize(signalTensor.add(noiseTensor.mul(ratio))));
+      if (isTypedArray) {
+        mixedXTensors.push(mixed.dataSync() as Float32Array);
+      } else {
+        mixedXTensors.push(mixed);
+      }
+      mixedLabelIndices.push(labelIndices[index]);
+    }
+    console.log(
+        `Data augmentation: mixing noise: added ${mixedXTensors.length} ` +
+        `examples`);
+    mixedXTensors.forEach(tensor => xs.push(tensor as T));
+    labelIndices.push(...mixedLabelIndices);
   }
 
   private getSortedUniqueNumFrames(): number[] {
@@ -565,9 +626,9 @@ export class Dataset {
     const numFrames = spectrogram.data.length / spectrogram.frameSize;
     tf.util.assert(
         keyFrameIndex >= 0 && keyFrameIndex < numFrames &&
-        Number.isInteger(keyFrameIndex),
-        `Invalid keyFrameIndex: ${keyFrameIndex}. ` +
-        `Must be >= 0, < ${numFrames}, and an integer.`);
+            Number.isInteger(keyFrameIndex),
+        () => `Invalid keyFrameIndex: ${keyFrameIndex}. ` +
+            `Must be >= 0, < ${numFrames}, and an integer.`);
     spectrogram.keyFrameIndex = keyFrameIndex;
   }
 
@@ -643,15 +704,36 @@ export class Dataset {
    *   - Second, the `Example`s for every label are sorted by the order in
    *     which they are added to this `Dataset`.
    *
-   * @returns A `SerializedDataset` object amenable to transmission and storage.
+   * @param wordLabels Optional word label(s) to serialize. If specified, only
+   *   the examples with labels matching the argument will be serialized. If
+   *   any specified word label does not exist in the vocabulary of this
+   *   dataset, an Error will be thrown.
+   * @returns A `ArrayBuffer` object amenable to transmission and storage.
    */
-  serialize(): ArrayBuffer {
+  serialize(wordLabels?: string|string[]): ArrayBuffer {
     const vocab = this.getVocabulary();
-    tf.util.assert(!this.empty(), `Cannot serialize empty Dataset`);
+    tf.util.assert(!this.empty(), () => `Cannot serialize empty Dataset`);
+
+    if (wordLabels != null) {
+      if (!Array.isArray(wordLabels)) {
+        wordLabels = [wordLabels];
+      }
+      wordLabels.forEach(wordLabel => {
+        if (vocab.indexOf(wordLabel) === -1) {
+          throw new Error(
+              `Word label "${wordLabel}" does not exist in the ` +
+              `vocabulary of this dataset. The vocabulary is: ` +
+              `${JSON.stringify(vocab)}.`);
+        }
+      });
+    }
 
     const manifest: ExampleSpec[] = [];
     const buffers: ArrayBuffer[] = [];
     for (const label of vocab) {
+      if (wordLabels != null && wordLabels.indexOf(label) === -1) {
+        continue;
+      }
       const ids = this.label2Ids[label];
       for (const id of ids) {
         const artifact = serializeExample(this.examples[id]);
@@ -745,14 +827,14 @@ function serializedExamples2ArrayBuffer(serialized: SerializedExamples):
 /** Decode an ArrayBuffer as intermediate serialization format. */
 export function arrayBuffer2SerializedExamples(buffer: ArrayBuffer):
     SerializedExamples {
-  tf.util.assert(buffer != null, 'Received null or undefined buffer');
+  tf.util.assert(buffer != null, () => 'Received null or undefined buffer');
   // Check descriptor.
   let offset = 0;
   const descriptor = arrayBuffer2String(
       buffer.slice(offset, DATASET_SERIALIZATION_DESCRIPTOR.length));
   tf.util.assert(
       descriptor === DATASET_SERIALIZATION_DESCRIPTOR,
-      `Deserialization error: Invalid descriptor`);
+      () => `Deserialization error: Invalid descriptor`);
   offset += DATASET_SERIALIZATION_DESCRIPTOR.length;
   // Skip the version part for now. It may be used in the future.
   offset += 4;
@@ -792,25 +874,27 @@ export function getValidWindows(
     windowHop: number): Array<[number, number]> {
   tf.util.assert(
       Number.isInteger(snippetLength) && snippetLength > 0,
-      `snippetLength must be a positive integer, but got ${snippetLength}`);
+      () =>
+          `snippetLength must be a positive integer, but got ${snippetLength}`);
   if (focusIndex != null) {
     tf.util.assert(
         Number.isInteger(focusIndex) && focusIndex >= 0,
-        `focusIndex must be a non-negative integer, but got ${focusIndex}`);
+        () =>
+            `focusIndex must be a non-negative integer, but got ${focusIndex}`);
   }
   tf.util.assert(
       Number.isInteger(windowLength) && windowLength > 0,
-      `windowLength must be a positive integer, but got ${windowLength}`);
+      () => `windowLength must be a positive integer, but got ${windowLength}`);
   tf.util.assert(
       Number.isInteger(windowHop) && windowHop > 0,
-      `windowHop must be a positive integer, but got ${windowHop}`);
+      () => `windowHop must be a positive integer, but got ${windowHop}`);
   tf.util.assert(
       windowLength <= snippetLength,
-      `windowLength (${windowLength}) exceeds snippetLength ` +
+      () => `windowLength (${windowLength}) exceeds snippetLength ` +
           `(${snippetLength})`);
   tf.util.assert(
       focusIndex < snippetLength,
-      `focusIndex (${focusIndex}) equals or exceeds snippetLength ` +
+      () => `focusIndex (${focusIndex}) equals or exceeds snippetLength ` +
           `(${snippetLength})`);
 
   if (windowLength === snippetLength) {

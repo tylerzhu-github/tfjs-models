@@ -15,30 +15,37 @@
  * =============================================================================
  */
 
-import {ConvolutionDefinition, mobileNetArchitectures} from './mobilenet';
+// Currently it is using local server for debugging.
+// TODO(tylerzhu): switch to use storage.googleapis.com.
+const RESNET50_BASE_URL =
+    'https://storage.googleapis.com/tfjs-models/savedmodel/bodypix/resnet50/';
+const MOBILENET_BASE_URL =
+    'https://storage.googleapis.com/tfjs-models/savedmodel/bodypix/mobilenet/';
 
-const BASE_URL = 'https://storage.googleapis.com/tfjs-models/savedmodel/';
 
-export type Checkpoint = {
-  url: string,
-  architecture: ConvolutionDefinition[]
-};
-
-export const checkpoints: {[multiplier: number]: Checkpoint} = {
-  1.0: {
-    url: BASE_URL + 'posenet_mobilenet_100_partmap/',
-    architecture: mobileNetArchitectures[100]
-  },
-  0.75: {
-    url: BASE_URL + 'posenet_mobilenet_075_partmap/',
-    architecture: mobileNetArchitectures[75]
-  },
-  0.5: {
-    url: BASE_URL + 'posenet_mobilenet_050_partmap/',
-    architecture: mobileNetArchitectures[50]
-  },
-  0.25: {
-    url: BASE_URL + 'posenet_mobilenet_025_partmap/',
-    architecture: mobileNetArchitectures[25]
+// The BodyPix 2.0 ResNet50 models use the latest TensorFlow.js 1.0 model
+// format.
+export function resNet50Checkpoint(stride: number, quantBytes: number): string {
+  const graphJson = `model-stride${stride}.json`;
+  // quantBytes=4 corresponding to the non-quantized full-precision checkpoints.
+  if (quantBytes == 4) {
+    return RESNET50_BASE_URL + `float/` + graphJson;
+  } else {
+    return RESNET50_BASE_URL + `quant${quantBytes}/` + graphJson;
   }
 };
+
+// The BodyPix 2.0 MobileNetV1 models use the latest TensorFlow.js 1.0 model
+// format.
+export function mobileNetCheckpoint(
+    stride: number, multiplier: number, quantBytes: number): string {
+  const toStr: {[key: number]: string} = {1.0: '100', 0.75: '075', 0.50: '050'};
+  const graphJson = `model-stride${stride}.json`;
+  // quantBytes=4 corresponding to the non-quantized full-precision checkpoints.
+  if (quantBytes == 4) {
+    return MOBILENET_BASE_URL + `float/${toStr[multiplier]}/` + graphJson;
+  } else {
+    return MOBILENET_BASE_URL + `quant${quantBytes}/${toStr[multiplier]}/` +
+        graphJson;
+  }
+}

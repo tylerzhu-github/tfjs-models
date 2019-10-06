@@ -20,9 +20,9 @@ There are two main ways to get this model in your JavaScript project: via script
 
 ```html
 <!-- Load TensorFlow.js. This is required to use MobileNet. -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.11.7"> </script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.0.1"> </script>
 <!-- Load the MobileNet model. -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@0.1.1"> </script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@1.0.0"> </script>
 
 <!-- Replace this with your image. Make sure CORS settings allow reading the image! -->
 <img id="img" src="cat.jpg"></img>
@@ -67,21 +67,38 @@ console.log(predictions);
 ## API
 
 #### Loading the model
-`mobilenet` is the module name, which is automatically included when you use
-the <script src> method. When using ES6 imports, mobilenet is the module.
+`mobilenet` is the module name, which is automatically included when you use the `<script src>` method. When using ES6 imports, mobilenet is the module.
+
+```ts
+mobilenet.load({
+    version: 1,
+    alpha?: 0.25 | .50 | .75 | 1.0,
+    modelUrl?: string
+    inputRange?: [number, number]
+  }
+)
+```
+___For users of previous versions (1.0.x), the API is:___
 
 ```ts
 mobilenet.load(
-  version?: 1,
-  alpha?: 0.25 | .50 | .75 | 1.0
+    version?: 1,
+    alpha?: 0.25 | .50 | .75 | 1.0
 )
 ```
 
-Args:
-- **version:** The MobileNet version number. Currently only accepts and defaults to version 1. In the future we will support MobileNet V2.
-- **alpha:** Controls the width of the network, trading accuracy for performance. A smaller alpha decreases accuracy and increases performance. Defaults to 1.0.
 
+
+Args:
+- **version:** The MobileNet version number. Use 1 for [MobileNetV1](https://github.com/tensorflow/models/blob/master/research/slim/nets/mobilenet_v1.md), and 2 for [MobileNetV2](https://github.com/tensorflow/models/tree/master/research/slim/nets/mobilenet). Defaults to 1.
+- **alpha:** Controls the width of the network, trading accuracy for performance. A smaller alpha decreases accuracy and increases performance. 0.25 is only available for V1. Defaults to 1.0.
+- **modelUrl:** Optional param for specifying the custom model url or `tf.io.IOHandler` object.
 Returns a `model` object.
+- **inputRange:** Optional param specifying the pixel value range expected by the trained model hosted at the modelUrl. This is typically [0, 1] or [-1, 1].
+
+`mobilenet` is the module name, which is automatically included when you use
+the <script src> method. When using ES6 imports, mobilenet is the module.
+
 
 #### Making a classification
 
@@ -105,7 +122,7 @@ Args:
 - **img:** A Tensor or an image element to make a classification on.
 - **topk:** How many of the top probabilities to return. Defaults to 3.
 
-Returns an array of classes and probabilities that looks like:
+Returns a Promise that resolves to an array of classes and probabilities that looks like:
 
 ```js
 [{
@@ -120,20 +137,18 @@ Returns an array of classes and probabilities that looks like:
 }]
 ```
 
-#### Getting activations
+#### Getting embeddings
 
-You can also use this model to get intermediate activations or logits as
-TensorFlow.js tensors.
-
-This method exists on the model that is loaded from `mobilenet.load`.
+You can also get the embedding of an image to do transfer learning. The size
+of the embedding depends on the alpha (width) of the model.
 
 ```ts
 model.infer(
   img: tf.Tensor3D | ImageData | HTMLImageElement |
       HTMLCanvasElement | HTMLVideoElement,
-  endpoint?: string
+  embedding = false
 )
 ```
 
 - **img:** A Tensor or an image element to make a classification on.
-- **endpoint:** The optional endpoint to predict through. You can list all the endpoints with `model.endpoints`. These correspond to layers of the MobileNet model. If undefined, will return 1000D unnormalized logits.
+- **embedding:** If true, it returns the embedding. Otherwise it returns the 1000-dim unnormalized logits.

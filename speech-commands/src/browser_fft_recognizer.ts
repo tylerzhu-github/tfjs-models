@@ -16,13 +16,13 @@
  */
 
 import * as tf from '@tensorflow/tfjs';
-import {TensorContainer} from '@tensorflow/tfjs-core/dist/tensor_types';
 
 import {BrowserFftFeatureExtractor, SpectrogramCallback} from './browser_fft_extractor';
-import {loadMetadataJson, normalize} from './browser_fft_utils';
+import {loadMetadataJson, normalize, normalizeFloat32Array} from './browser_fft_utils';
 import {BACKGROUND_NOISE_TAG, Dataset} from './dataset';
+import {concatenateFloat32Arrays} from './generic_utils';
 import {balancedTrainValSplit} from './training_utils';
-import {EvaluateConfig, EvaluateResult, Example, ExampleCollectionOptions, RecognizeConfig, RecognizerCallback, RecognizerParams, ROCCurve, SpectrogramData, SpeechCommandRecognizer, SpeechCommandRecognizerResult, StreamingRecognitionConfig, TransferLearnConfig, TransferSpeechCommandRecognizer} from './types';
+import {AudioDataAugmentationOptions, EvaluateConfig, EvaluateResult, Example, ExampleCollectionOptions, RecognizeConfig, RecognizerCallback, RecognizerParams, ROCCurve, SpectrogramData, SpeechCommandRecognizer, SpeechCommandRecognizerMetadata, SpeechCommandRecognizerResult, StreamingRecognitionConfig, TransferLearnConfig, TransferSpeechCommandRecognizer} from './types';
 import {version} from './version';
 
 export const UNKNOWN_TAG = '_unknown_';
@@ -32,8 +32,6 @@ export const UNKNOWN_TAG = '_unknown_';
 export const SAVED_MODEL_METADATA_KEY =
     'tfjs-speech-commands-saved-model-metadata';
 export const SAVE_PATH_PREFIX = 'indexeddb://tfjs-speech-commands-model/';
-
-let streaming = false;
 
 // Export a variable for injection during unit testing.
 // tslint:disable-next-line:no-any
@@ -68,11 +66,13 @@ export class BrowserFftSpeechCommandRecognizer implements
   private readonly FFT_SIZE = 1024;
   private readonly DEFAULT_SUPPRESSION_TIME_MILLIS = 0;
 
-  model: tf.Model;
-  modelWithEmbeddingOutput: tf.Model;
+  model: tf.LayersModel;
+  modelWithEmbeddingOutput: tf.LayersModel;
   readonly vocabulary: string;
   readonly parameters: RecognizerParams;
   protected words: string[];
+
+  protected streaming = false;
 
   protected nonBatchInputShape: [number, number, number];
   private elementsPerExample: number;
@@ -81,8 +81,8 @@ export class BrowserFftSpeechCommandRecognizer implements
   private transferRecognizers:
       {[name: string]: TransferBrowserFftSpeechCommandRecognizer} = {};
 
-  private modelURL: string;
-  private metadataURL: string;
+  private modelArtifactsOrURL: tf.io.ModelArtifacts|string;
+  private metadataOrURL: SpeechCommandRecognizerMetadata|string;
 
   // The second-last dense layer in the base model.
   // To be used for unfreezing during fine-tuning.
@@ -93,39 +93,46 @@ export class BrowserFftSpeechCommandRecognizer implements
    *
    * @param vocabulary An optional vocabulary specifier. Mutually exclusive
    *   with `modelURL` and `metadataURL`.
-   * @param modelURL An optional, custom model URL pointing to a model.json
+   * @param modelArtifactsOrURL An optional, custom model URL pointing to a
+   *     model.json, or modelArtifacts in the format of `tf.io.ModelArtifacts`.
    *   file. Supported schemes: http://, https://, and node.js-only: file://.
    *   Mutually exclusive with `vocabulary`. If provided, `metadatURL`
    *   most also be provided.
-   * @param metadataURL A custom metadata URL pointing to a metadata.json
-   *   file. Must be provided together with `modelURL`.
+   * @param metadataOrURL A custom metadata URL pointing to a metadata.json
+   *   file. Or it can be a metadata JSON object itself. Must be provided
+   *   together with `modelArtifactsOrURL`.
    */
-  constructor(vocabulary?: string, modelURL?: string, metadataURL?: string) {
+  constructor(
+      vocabulary?: string, modelArtifactsOrURL?: tf.io.ModelArtifacts|string,
+      metadataOrURL?: SpeechCommandRecognizerMetadata|string) {
+    // TODO(cais): Consolidate the fields into a single config object when
+    // upgrading to v1.0.
     tf.util.assert(
-        modelURL == null && metadataURL == null ||
-            modelURL != null && metadataURL != null,
-        `modelURL and metadataURL must be both provided or ` +
+        modelArtifactsOrURL == null && metadataOrURL == null ||
+            modelArtifactsOrURL != null && metadataOrURL != null,
+        () => `modelURL and metadataURL must be both provided or ` +
             `both not provided.`);
-    if (modelURL == null) {
+    if (modelArtifactsOrURL == null) {
       if (vocabulary == null) {
         vocabulary = BrowserFftSpeechCommandRecognizer.DEFAULT_VOCABULARY_NAME;
       } else {
         tf.util.assert(
             BrowserFftSpeechCommandRecognizer.VALID_VOCABULARY_NAMES.indexOf(
                 vocabulary) !== -1,
-            `Invalid vocabulary name: '${vocabulary}'`);
+            () => `Invalid vocabulary name: '${vocabulary}'`);
       }
       this.vocabulary = vocabulary;
-      this.modelURL = `${this.MODEL_URL_PREFIX}/${this.vocabulary}/model.json`;
-      this.metadataURL =
+      this.modelArtifactsOrURL =
+          `${this.MODEL_URL_PREFIX}/${this.vocabulary}/model.json`;
+      this.metadataOrURL =
           `${this.MODEL_URL_PREFIX}/${this.vocabulary}/metadata.json`;
     } else {
       tf.util.assert(
           vocabulary == null,
-          `vocabulary name must be null or undefined when modelURL is ` +
+          () => `vocabulary name must be null or undefined when modelURL is ` +
               `provided`);
-      this.modelURL = modelURL;
-      this.metadataURL = metadataURL;
+      this.modelArtifactsOrURL = modelArtifactsOrURL;
+      this.metadataOrURL = metadataOrURL;
     }
 
     this.parameters = {
@@ -165,7 +172,7 @@ export class BrowserFftSpeechCommandRecognizer implements
   async listen(
       callback: RecognizerCallback,
       config?: StreamingRecognitionConfig): Promise<void> {
-    if (streaming) {
+    if (this.streaming) {
       throw new Error(
           'Cannot start streaming again when streaming is ongoing.');
     }
@@ -183,7 +190,7 @@ export class BrowserFftSpeechCommandRecognizer implements
     }
     tf.util.assert(
         probabilityThreshold >= 0 && probabilityThreshold <= 1,
-        `Invalid probabilityThreshold value: ${probabilityThreshold}`);
+        () => `Invalid probabilityThreshold value: ${probabilityThreshold}`);
     let invokeCallbackOnNoiseAndUnknown =
         config.invokeCallbackOnNoiseAndUnknown == null ?
         false :
@@ -204,9 +211,11 @@ export class BrowserFftSpeechCommandRecognizer implements
         config.overlapFactor == null ? 0.5 : config.overlapFactor;
     tf.util.assert(
         overlapFactor >= 0 && overlapFactor < 1,
-        `Expected overlapFactor to be >= 0 and < 1, but got ${overlapFactor}`);
+        () => `Expected overlapFactor to be >= 0 and < 1, but got ${
+            overlapFactor}`);
 
-    const spectrogramCallback: SpectrogramCallback = async (x: tf.Tensor) => {
+    const spectrogramCallback: SpectrogramCallback =
+        async (x: tf.Tensor, timeData?: tf.Tensor) => {
       const normalizedX = normalize(x);
       let y: tf.Tensor;
       let embedding: tf.Tensor;
@@ -264,13 +273,13 @@ export class BrowserFftSpeechCommandRecognizer implements
       overlapFactor
     });
 
-    await this.audioDataExtractor.start();
+    await this.audioDataExtractor.start(config.audioTrackConstraints);
 
-    streaming = true;
+    this.streaming = true;
   }
 
   /**
-   * Load the underlying tf.Model instance and associated metadata.
+   * Load the underlying tf.LayersModel instance and associated metadata.
    *
    * If the model and the metadata are already loaded, do nothing.
    */
@@ -281,7 +290,17 @@ export class BrowserFftSpeechCommandRecognizer implements
 
     await this.ensureMetadataLoaded();
 
-    const model = await tf.loadModel(this.modelURL);
+    let model: tf.LayersModel;
+    if (typeof this.modelArtifactsOrURL === 'string') {
+      model = await tf.loadLayersModel(this.modelArtifactsOrURL);
+    } else {
+      // this.modelArtifactsOrURL is an instance of `tf.io.ModelArtifacts`.
+      model = await tf.loadLayersModel(tf.io.fromMemory(
+          this.modelArtifactsOrURL.modelTopology,
+          this.modelArtifactsOrURL.weightSpecs,
+          this.modelArtifactsOrURL.weightData));
+    }
+
     // Check the validity of the model's input shape.
     if (model.inputs.length !== 1) {
       throw new Error(
@@ -375,8 +394,25 @@ export class BrowserFftSpeechCommandRecognizer implements
     if (this.words != null) {
       return;
     }
-    const metadataJSON = await loadMetadataJson(this.metadataURL);
-    this.words = metadataJSON.words;
+
+    const metadataJSON = typeof this.metadataOrURL === 'string' ?
+        await loadMetadataJson(this.metadataOrURL) :
+        this.metadataOrURL;
+
+    if (metadataJSON.wordLabels == null) {
+      // In some legacy formats, the field 'words', instead of 'wordLabels',
+      // was populated. This branch ensures backward compatibility with those
+      // formats.
+      // tslint:disable-next-line:no-any
+      const legacyWords = (metadataJSON as any)['words'] as string[];
+      if (legacyWords == null) {
+        throw new Error(
+            'Cannot find field "words" or "wordLabels" in metadata JSON file');
+      }
+      this.words = legacyWords;
+    } else {
+      this.words = metadataJSON.wordLabels;
+    }
   }
 
   /**
@@ -385,18 +421,18 @@ export class BrowserFftSpeechCommandRecognizer implements
    * @throws Error if there is not ongoing streaming recognition.
    */
   async stopListening(): Promise<void> {
-    if (!streaming) {
+    if (!this.streaming) {
       throw new Error('Cannot stop streaming when streaming is not ongoing.');
     }
     await this.audioDataExtractor.stop();
-    streaming = false;
+    this.streaming = false;
   }
 
   /**
    * Check if streaming recognition is ongoing.
    */
   isListening(): boolean {
-    return streaming;
+    return this.streaming;
   }
 
   /**
@@ -418,7 +454,7 @@ export class BrowserFftSpeechCommandRecognizer implements
   }
 
   /**
-   * Get the input shape of the underlying tf.Model.
+   * Get the input shape of the underlying tf.LayersModel.
    *
    * @returns The input shape.
    */
@@ -552,11 +588,11 @@ export class BrowserFftSpeechCommandRecognizer implements
     }
     tf.util.assert(
         name != null && typeof name === 'string' && name.length > 1,
-        `Expected the name for a transfer-learning recognized to be a ` +
+        () => `Expected the name for a transfer-learning recognized to be a ` +
             `non-empty string, but got ${JSON.stringify(name)}`);
     tf.util.assert(
         this.transferRecognizers[name] == null,
-        `There is already a transfer-learning model named '${name}'`);
+        () => `There is already a transfer-learning model named '${name}'`);
     const transfer = new TransferBrowserFftSpeechCommandRecognizer(
         name, this.parameters, this.model);
     this.transferRecognizers[name] = transfer;
@@ -605,11 +641,11 @@ class TransferBrowserFftSpeechCommandRecognizer extends
    */
   constructor(
       readonly name: string, readonly parameters: RecognizerParams,
-      readonly baseModel: tf.Model) {
+      readonly baseModel: tf.LayersModel) {
     super();
     tf.util.assert(
         name != null && typeof name === 'string' && name.length > 0,
-        `The name of a transfer model must be a non-empty string, ` +
+        () => `The name of a transfer model must be a non-empty string, ` +
             `but got ${JSON.stringify(name)}`);
     this.nonBatchInputShape =
         this.baseModel.inputs[0].shape.slice(1) as [number, number, number];
@@ -630,13 +666,13 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   async collectExample(word: string, options?: ExampleCollectionOptions):
       Promise<SpectrogramData> {
     tf.util.assert(
-        !streaming,
-        'Cannot start collection of transfer-learning example because ' +
+        !this.streaming,
+        () => 'Cannot start collection of transfer-learning example because ' +
             'a streaming recognition or transfer-learning example collection ' +
             'is ongoing');
     tf.util.assert(
         word != null && typeof word === 'string' && word.length > 0,
-        `Must provide a non-empty string when collecting transfer-` +
+        () => `Must provide a non-empty string when collecting transfer-` +
             `learning example`);
 
     if (options == null) {
@@ -652,7 +688,8 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     if (options.durationSec != null) {
       tf.util.assert(
           options.durationSec > 0,
-          `Expected durationSec to be > 0, but got ${options.durationSec}`);
+          () =>
+              `Expected durationSec to be > 0, but got ${options.durationSec}`);
       const frameDurationSec =
           this.parameters.fftSize / this.parameters.sampleRateHz;
       numFramesPerSpectrogram =
@@ -660,7 +697,7 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     } else if (options.durationMultiplier != null) {
       tf.util.assert(
           options.durationMultiplier >= 1,
-          `Expected duration multiplier to be >= 1, ` +
+          () => `Expected duration multiplier to be >= 1, ` +
               `but got ${options.durationMultiplier}`);
       numFramesPerSpectrogram =
           Math.round(this.nonBatchInputShape[0] * options.durationMultiplier);
@@ -668,25 +705,105 @@ class TransferBrowserFftSpeechCommandRecognizer extends
       numFramesPerSpectrogram = this.nonBatchInputShape[0];
     }
 
-    streaming = true;
+    if (options.snippetDurationSec != null) {
+      tf.util.assert(
+          options.snippetDurationSec > 0,
+          () => `snippetDurationSec is expected to be > 0, but got ` +
+              `${options.snippetDurationSec}`);
+      tf.util.assert(
+          options.onSnippet != null,
+          () => `onSnippet must be provided if snippetDurationSec ` +
+              `is provided.`);
+    }
+    if (options.onSnippet != null) {
+      tf.util.assert(
+          options.snippetDurationSec != null,
+          () => `snippetDurationSec must be provided if onSnippet ` +
+              `is provided.`);
+    }
+    const frameDurationSec =
+        this.parameters.fftSize / this.parameters.sampleRateHz;
+    const totalDurationSec = frameDurationSec * numFramesPerSpectrogram;
+
+    this.streaming = true;
     return new Promise<SpectrogramData>(resolve => {
-      const spectrogramCallback: SpectrogramCallback = async (x: tf.Tensor) => {
-        const normalizedX = normalize(x);
-        this.dataset.addExample({
-          label: word,
-          spectrogram: {
-            data: await normalizedX.data() as Float32Array,
+      const stepFactor = options.snippetDurationSec == null ?
+          1 :
+          options.snippetDurationSec / totalDurationSec;
+      const overlapFactor = 1 - stepFactor;
+      const callbackCountTarget = Math.round(1 / stepFactor);
+      let callbackCount = 0;
+      let lastIndex = -1;
+      const spectrogramSnippets: Float32Array[] = [];
+
+      const spectrogramCallback: SpectrogramCallback =
+          async (freqData: tf.Tensor, timeData?: tf.Tensor) => {
+        // TODO(cais): can we consolidate the logic in the two branches?
+        if (options.onSnippet == null) {
+          const normalizedX = normalize(freqData);
+          this.dataset.addExample({
+            label: word,
+            spectrogram: {
+              data: await normalizedX.data() as Float32Array,
+              frameSize: this.nonBatchInputShape[1],
+            },
+            rawAudio: options.includeRawAudio ? {
+              data: await timeData.data() as Float32Array,
+              sampleRateHz: this.audioDataExtractor.sampleRateHz
+            } :
+                                                undefined
+          });
+          normalizedX.dispose();
+          await this.audioDataExtractor.stop();
+          this.streaming = false;
+          this.collateTransferWords();
+          resolve({
+            data: await freqData.data() as Float32Array,
             frameSize: this.nonBatchInputShape[1],
+          });
+        } else {
+          const data = await freqData.data() as Float32Array;
+          if (lastIndex === -1) {
+            lastIndex = data.length;
           }
-        });
-        normalizedX.dispose();
-        await this.audioDataExtractor.stop();
-        streaming = false;
-        this.collateTransferWords();
-        resolve({
-          data: await x.data() as Float32Array,
-          frameSize: this.nonBatchInputShape[1],
-        });
+          let i = lastIndex - 1;
+          while (data[i] !== 0 && i >= 0) {
+            i--;
+          }
+          const increment = lastIndex - i - 1;
+          lastIndex = i + 1;
+          const snippetData = data.slice(data.length - increment, data.length);
+          spectrogramSnippets.push(snippetData);
+
+          if (options.onSnippet != null) {
+            options.onSnippet(
+                {data: snippetData, frameSize: this.nonBatchInputShape[1]});
+          }
+
+          if (callbackCount++ === callbackCountTarget) {
+            await this.audioDataExtractor.stop();
+            this.streaming = false;
+            this.collateTransferWords();
+
+            const normalized = normalizeFloat32Array(
+                concatenateFloat32Arrays(spectrogramSnippets));
+            const finalSpectrogram: SpectrogramData = {
+              data: normalized,
+              frameSize: this.nonBatchInputShape[1]
+            };
+            this.dataset.addExample({
+              label: word,
+              spectrogram: finalSpectrogram,
+              rawAudio: options.includeRawAudio ? {
+                data: await timeData.data() as Float32Array,
+                sampleRateHz: this.audioDataExtractor.sampleRateHz
+              } :
+                                                  undefined
+            });
+            // TODO(cais): Fix 1-tensor memory leak.
+            resolve(finalSpectrogram);
+          }
+        }
         return false;
       };
       this.audioDataExtractor = new BrowserFftFeatureExtractor({
@@ -695,9 +812,10 @@ class TransferBrowserFftSpeechCommandRecognizer extends
         columnTruncateLength: this.nonBatchInputShape[1],
         suppressionTimeMillis: 0,
         spectrogramCallback,
-        overlapFactor: 0
+        overlapFactor,
+        includeRawAudio: options.includeRawAudio
       });
-      this.audioDataExtractor.start();
+      this.audioDataExtractor.start(options.audioTrackConstraints);
     });
   }
 
@@ -707,7 +825,8 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   clearExamples(): void {
     tf.util.assert(
         this.words != null && this.words.length > 0 && !this.dataset.empty(),
-        `No transfer learning examples exist for model name ${this.name}`);
+        () =>
+            `No transfer learning examples exist for model name ${this.name}`);
     this.dataset.clear();
     this.words = null;
   }
@@ -786,9 +905,17 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     this.collateTransferWords();
   }
 
-  /** Serialize the existing examples. */
-  serializeExamples(): ArrayBuffer {
-    return this.dataset.serialize();
+  /**
+   * Serialize the existing examples.
+   *
+   * @param wordLabels Optional word label(s) to serialize. If specified, only
+   *   the examples with labels matching the argument will be serialized. If
+   *   any specified word label does not exist in the vocabulary of this
+   *   transfer recognizer, an Error will be thrown.
+   * @returns An `ArrayBuffer` object amenable to transmission and storage.
+   */
+  serializeExamples(wordLabels?: string|string[]): ArrayBuffer {
+    return this.dataset.serialize(wordLabels);
   }
 
   /**
@@ -812,15 +939,16 @@ class TransferBrowserFftSpeechCommandRecognizer extends
    * @returns xs: The feature tensors (xs), a 4D tf.Tensor.
    *          ys: The target tensors (ys), one-hot encoding, a 2D tf.Tensor.
    */
-  private collectTransferDataAsTensors(windowHopRatio?: number):
+  private collectTransferDataAsTensors(
+      windowHopRatio?: number,
+      augmentationOptions?: AudioDataAugmentationOptions):
       {xs: tf.Tensor, ys: tf.Tensor} {
     const numFrames = this.nonBatchInputShape[0];
     windowHopRatio = windowHopRatio || DEFAULT_WINDOW_HOP_RATIO;
     const hopFrames = Math.round(windowHopRatio * numFrames);
-    const out = this.dataset.getData(null, {
-      numFrames,
-      hopFrames
-    }) as {xs: tf.Tensor4D, ys?: tf.Tensor2D};
+    const out = this.dataset.getData(
+                    null, {numFrames, hopFrames, ...augmentationOptions}) as
+        {xs: tf.Tensor4D, ys?: tf.Tensor2D};
     return {xs: out.xs, ys: out.ys as tf.Tensor};
   }
 
@@ -842,8 +970,9 @@ class TransferBrowserFftSpeechCommandRecognizer extends
    *   `this.model.fitDataset`.
    */
   private collectTransferDataAsTfDataset(
-      windowHopRatio?: number, validationSplit = 0.15, batchSize = 32):
-      [tf.data.Dataset<TensorContainer>, tf.data.Dataset<TensorContainer>] {
+      windowHopRatio?: number, validationSplit = 0.15, batchSize = 32,
+      augmentationOptions?: AudioDataAugmentationOptions):
+      [tf.data.Dataset<{}>, tf.data.Dataset<{}>] {
     const numFrames = this.nonBatchInputShape[0];
     windowHopRatio = windowHopRatio || DEFAULT_WINDOW_HOP_RATIO;
     const hopFrames = Math.round(windowHopRatio * numFrames);
@@ -852,8 +981,9 @@ class TransferBrowserFftSpeechCommandRecognizer extends
       hopFrames,
       getDataset: true,
       datasetBatchSize: batchSize,
-      datasetValidationSplit: validationSplit
-    }) as [tf.data.Dataset<TensorContainer>, tf.data.Dataset<TensorContainer>];
+      datasetValidationSplit: validationSplit,
+      ...augmentationOptions
+    }) as [tf.data.Dataset<{}>, tf.data.Dataset<{}>];
     // TODO(cais): See if we can tighten the typing.
   }
 
@@ -877,19 +1007,21 @@ class TransferBrowserFftSpeechCommandRecognizer extends
       Promise<tf.History|[tf.History, tf.History]> {
     tf.util.assert(
         this.words != null && this.words.length > 0,
-        `Cannot train transfer-learning model '${this.name}' because no ` +
+        () =>
+            `Cannot train transfer-learning model '${this.name}' because no ` +
             `transfer learning example has been collected.`);
     tf.util.assert(
         this.words.length > 1,
-        `Cannot train transfer-learning model '${this.name}' because only ` +
+        () => `Cannot train transfer-learning model '${
+                  this.name}' because only ` +
             `1 word label ('${JSON.stringify(this.words)}') ` +
             `has been collected for transfer learning. Requires at least 2.`);
     if (config.fineTuningEpochs != null) {
       tf.util.assert(
           config.fineTuningEpochs >= 0 &&
               Number.isInteger(config.fineTuningEpochs),
-          `If specified, fineTuningEpochs must be a non-negative integer, ` +
-              `but received ${config.fineTuningEpochs}`);
+          () => `If specified, fineTuningEpochs must be a non-negative ` +
+              `integer, but received ${config.fineTuningEpochs}`);
     }
 
     if (config == null) {
@@ -916,13 +1048,14 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     // the recordings exceeds 60 seconds. Otherwise, use `tf.Tensor` objects.
     const datasetDurationMillisThreshold =
         config.fitDatasetDurationMillisThreshold == null ?
-        60e3 : config.fitDatasetDurationMillisThreshold;
-    console.log(
-        `Detected large dataset: total duration = ` +
-        `${this.dataset.durationMillis()} ms > ` +
-        `${datasetDurationMillisThreshold} ms. ` +
-        `Training transfer model using fitDataset() instead of fit()`);
+        60e3 :
+        config.fitDatasetDurationMillisThreshold;
     if (this.dataset.durationMillis() > datasetDurationMillisThreshold) {
+      console.log(
+          `Detected large dataset: total duration = ` +
+          `${this.dataset.durationMillis()} ms > ` +
+          `${datasetDurationMillisThreshold} ms. ` +
+          `Training transfer model using fitDataset() instead of fit()`);
       return await this.trainOnDataset(config);
     } else {
       return await this.trainOnTensors(config);
@@ -932,13 +1065,14 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   /** Helper function for training on tf.data.Dataset objects. */
   private async trainOnDataset(config?: TransferLearnConfig):
       Promise<tf.History|[tf.History, tf.History]> {
-    tf.util.assert(config.epochs > 0, `Invalid config.epochs`);
+    tf.util.assert(config.epochs > 0, () => `Invalid config.epochs`);
     // Train transfer-learning model using fitDataset
 
     const batchSize = config.batchSize == null ? 32 : config.batchSize;
     const windowHopRatio = config.windowHopRatio || DEFAULT_WINDOW_HOP_RATIO;
     const [trainDataset, valDataset] = this.collectTransferDataAsTfDataset(
-        windowHopRatio, config.validationSplit, batchSize);
+        windowHopRatio, config.validationSplit, batchSize,
+        {augmentByMixingNoiseRatio: config.augmentByMixingNoiseRatio});
     const t0 = tf.util.now();
     const history = await this.model.fitDataset(trainDataset, {
       epochs: config.epochs,
@@ -966,7 +1100,9 @@ class TransferBrowserFftSpeechCommandRecognizer extends
       Promise<tf.History|[tf.History, tf.History]> {
     // Prepare the data.
     const windowHopRatio = config.windowHopRatio || DEFAULT_WINDOW_HOP_RATIO;
-    const {xs, ys} = this.collectTransferDataAsTensors(windowHopRatio);
+    const {xs, ys} = this.collectTransferDataAsTensors(
+        windowHopRatio,
+        {augmentByMixingNoiseRatio: config.augmentByMixingNoiseRatio});
     console.log(
         `Training data: xs.shape = ${xs.shape}, ys.shape = ${ys.shape}`);
 
@@ -1009,9 +1145,8 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   }
 
   private async fineTuningUsingTfDatasets(
-      config: TransferLearnConfig,
-      trainDataset: tf.data.Dataset<TensorContainer>,
-      valDataset: tf.data.Dataset<TensorContainer>): Promise<tf.History> {
+      config: TransferLearnConfig, trainDataset: tf.data.Dataset<{}>,
+      valDataset: tf.data.Dataset<{}>): Promise<tf.History> {
     const originalTrainableValue = this.secondLastBaseDenseLayer.trainable;
     this.secondLastBaseDenseLayer.trainable = true;
 
@@ -1054,9 +1189,8 @@ class TransferBrowserFftSpeechCommandRecognizer extends
       epochs: config.fineTuningEpochs,
       validationData: valData,
       batchSize: config.batchSize,
-      callbacks: config.fineTuningCallback == null ?
-          null :
-          [config.fineTuningCallback]
+      callbacks: config.fineTuningCallback == null ? null :
+                                                     [config.fineTuningCallback]
     });
     // Set the trainable attribute of the fine-tuning layer to its
     // previous value.
@@ -1075,20 +1209,19 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     tf.util.assert(
         config.wordProbThresholds != null &&
             config.wordProbThresholds.length > 0,
-        `Received null or empty wordProbThresholds`);
+        () => `Received null or empty wordProbThresholds`);
 
     // TODO(cais): Maybe relax this requirement.
     const NOISE_CLASS_INDEX = 0;
     tf.util.assert(
         this.words[NOISE_CLASS_INDEX] === BACKGROUND_NOISE_TAG,
-        `Cannot perform evaluation when the first tag is not ` +
+        () => `Cannot perform evaluation when the first tag is not ` +
             `${BACKGROUND_NOISE_TAG}`);
 
     return tf.tidy(() => {
       const rocCurve: ROCCurve = [];
       let auc = 0;
-      const {xs, ys} =
-          this.collectTransferDataAsTensors(config.windowHopRatio);
+      const {xs, ys} = this.collectTransferDataAsTensors(config.windowHopRatio);
       const indices = ys.argMax(-1).dataSync();
       const probs = this.model.predict(xs) as tf.Tensor;
 
@@ -1143,7 +1276,7 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   }
 
   /**
-   * Create an instance of tf.Model for transfer learning.
+   * Create an instance of tf.LayersModel for transfer learning.
    *
    * The top dense layer of the base model is replaced with a new softmax
    * dense layer.
@@ -1151,7 +1284,8 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   private createTransferModelFromBaseModel(): void {
     tf.util.assert(
         this.words != null,
-        `No word example is available for tranfer-learning model of name ` +
+        () =>
+            `No word example is available for tranfer-learning model of name ` +
             this.name);
 
     // Find the second last dense layer.
@@ -1174,7 +1308,8 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     this.transferHead.add(tf.layers.dense({
       units: this.words.length,
       activation: 'softmax',
-      inputShape: truncatedBaseOutput.shape.slice(1)
+      inputShape: truncatedBaseOutput.shape.slice(1),
+      name: 'NewHeadDense'
     }));
     const transferOutput =
         this.transferHead.apply(truncatedBaseOutput) as tf.SymbolicTensor;
@@ -1183,7 +1318,7 @@ class TransferBrowserFftSpeechCommandRecognizer extends
   }
 
   /**
-   * Get the input shape of the underlying tf.Model.
+   * Get the input shape of the underlying tf.LayersModel.
    *
    * @returns The input shape.
    */
@@ -1191,12 +1326,7 @@ class TransferBrowserFftSpeechCommandRecognizer extends
     return this.baseModel.inputs[0].shape;
   }
 
-  private getMetadata(): {
-    tfjsSpeechCommandsVersion: string,
-    modelName: string,
-    timeStamp: string,
-    wordLabels: string[]
-  } {
+  getMetadata(): SpeechCommandRecognizerMetadata {
     return {
       tfjsSpeechCommandsVersion: version,
       modelName: this.name,
@@ -1239,7 +1369,7 @@ class TransferBrowserFftSpeechCommandRecognizer extends
       console.log(
           `Loaded word list for model named ${this.name}: ${this.words}`);
     }
-    this.model = await tf.loadModel(handlerOrURL);
+    this.model = await tf.loadLayersModel(handlerOrURL);
     console.log(`Loaded model from ${handlerOrURL}:`);
     this.model.summary();
   }

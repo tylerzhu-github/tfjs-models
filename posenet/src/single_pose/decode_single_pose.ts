@@ -15,10 +15,10 @@
  * =============================================================================
  */
 
-import * as tf from '@tensorflow/tfjs';
+import * as tf from '@tensorflow/tfjs-core';
 
 import {partNames} from '../keypoints';
-import {OutputStride} from '../mobilenet';
+import {PoseNetOutputStride} from '../posenet_model';
 import {Keypoint, Pose} from '../types';
 import {toTensorBuffer} from '../util';
 
@@ -38,7 +38,7 @@ import {getOffsetPoints, getPointsConfidence} from './util';
  * row being the offset vector for the corresponding keypoint.
  * To get the keypoint, each part’s heatmap y and x are multiplied
  * by the output stride then added to their corresponding offset vector,
- * which is in the same scale as the original image. 
+ * which is in the same scale as the original image.
  *
  * @param heatmapScores 3-D tensor with shape `[height, width, numParts]`.
  * The value of heatmapScores[y, x, k]` is the score of placing the `k`-th
@@ -58,15 +58,19 @@ import {getOffsetPoints, getPointsConfidence} from './util';
  */
 export async function decodeSinglePose(
     heatmapScores: tf.Tensor3D, offsets: tf.Tensor3D,
-    outputStride: OutputStride): Promise<Pose> {
+    outputStride: PoseNetOutputStride): Promise<Pose> {
   let totalScore = 0.0;
 
   const heatmapValues = argmax2d(heatmapScores);
 
-  const [scoresBuffer, offsetsBuffer, heatmapValuesBuffer] = await Promise.all([
+  const allTensorBuffers = await Promise.all([
     toTensorBuffer(heatmapScores), toTensorBuffer(offsets),
     toTensorBuffer(heatmapValues, 'int32')
   ]);
+
+  const scoresBuffer = allTensorBuffers[0];
+  const offsetsBuffer = allTensorBuffers[1];
+  const heatmapValuesBuffer = allTensorBuffers[2];
 
   const offsetPoints =
       getOffsetPoints(heatmapValuesBuffer, outputStride, offsetsBuffer);
