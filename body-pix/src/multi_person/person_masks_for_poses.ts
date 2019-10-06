@@ -22,6 +22,7 @@ export function personMasksForPosesGPU(
     maxNumPeople: number): tf.Tensor2D {
   // The height/width of the image/canvas itself.
   const [origHeight, origWidth] = segmentation.shape;
+
   // The height/width of the output of the model.
   const [outHeight, outWidth] = longOffsets.shape.slice(0, 2);
 
